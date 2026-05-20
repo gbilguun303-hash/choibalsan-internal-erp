@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="mn">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ХАБЭА — Чойбалсан хөгжил ОНХЯУ</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Segoe UI','Noto Sans',Arial,sans-serif;background:#f3f4f6;font-size:14px;color:#111827}
+  input,select,textarea{background:#f9fafb;border:1px solid #d1d5db;border-radius:8px;padding:8px 12px;font-size:13px;color:#111827;width:100%;outline:none;font-family:inherit;transition:border .15s}
+  input:focus,select:focus,textarea:focus{border-color:#3b82f6;background:#fff}
+  textarea{resize:vertical;min-height:64px}
+  button{cursor:pointer;font-family:inherit;transition:opacity .15s}
+  button:hover{opacity:.85}
+  label{cursor:pointer}
+  .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}
+  /* Sidebar match */
+  .page-wrap{display:flex;min-height:100vh}
+  .main-content{flex:1;padding:24px 28px;background:#f3f4f6;overflow:auto}
+  /* Cards */
+  .dash-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px;margin-bottom:20px}
+  .dash-card{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:16px 18px;border-top-width:4px}
+  .dash-card .label{font-size:12px;color:#6b7280;font-weight:500;margin-bottom:6px}
+  .dash-card .value{font-size:28px;font-weight:700;color:#111827;line-height:1}
+  .dash-card .sub{font-size:11px;color:#9ca3af;margin-top:4px}
+  .dash-card .icon{float:right;font-size:20px}
+  /* Safety rules */
+  .safety-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-bottom:20px}
+  .safety-card{border-radius:10px;padding:12px 14px;border:1px solid}
+  /* Form */
+  .form-card{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:20px;margin-bottom:20px;display:none}
+  .form-card.open{display:block}
+  .form-grid-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:12px}
+  .form-grid-2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
+  .field-label{font-size:12px;font-weight:600;color:#374151;display:block;margin-bottom:4px}
+  .ppe-wrap{display:flex;flex-wrap:wrap;gap:8px;padding:10px 12px;background:#f9fafb;border-radius:8px;border:1px solid #e5e7eb}
+  .ppe-label{display:flex;align-items:center;gap:5px;padding:5px 10px;border-radius:6px;border:1px solid #d1d5db;font-size:12px;background:#fff;color:#374151;transition:all .15s;user-select:none}
+  .ppe-label.checked{background:#dbeafe;border-color:#93c5fd;color:#1d4ed8;font-weight:600}
+  .ppe-label input{accent-color:#1d4ed8;width:auto}
+  /* Table */
+  .table-wrap{background:#fff;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden}
+  .table-head{padding:14px 18px;border-bottom:1px solid #e5e7eb;display:flex;justify-content:space-between;align-items:center}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  thead tr{background:#f9fafb}
+  th{padding:9px 13px;text-align:left;font-weight:600;color:#6b7280;border-bottom:1px solid #e5e7eb;white-space:nowrap}
+  tbody tr{border-bottom:1px solid #f3f4f6;cursor:pointer;transition:background .1s}
+  tbody tr:hover{background:#f9fafb}
+  td{padding:11px 13px;vertical-align:middle}
+  .detail-row td{background:#f8fafc;border-bottom:2px solid #dbeafe;cursor:default}
+  /* Badges */
+  .badge{border-radius:5px;padding:2px 9px;font-size:11px;font-weight:600;border:1px solid;display:inline-block}
+  /* Action buttons */
+  .act-btn{border-radius:5px;padding:3px 9px;font-size:11px;font-weight:600;border:1px solid;white-space:nowrap}
+  /* Timeline */
+  .tl{display:flex;align-items:flex-start}
+  .tl-step{display:flex;align-items:center;flex:1}
+  .tl-dot{width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;flex-shrink:0}
+  .tl-line{flex:1;height:2px;margin:0 2px;margin-bottom:16px}
+  .tl-lbl{font-size:9px;white-space:nowrap;text-align:center;margin-top:3px}
+  /* Buttons */
+  .btn-primary{background:#1d4ed8;color:#fff;border:none;border-radius:8px;padding:9px 20px;font-size:13px;font-weight:600}
+  .btn-secondary{background:#f3f4f6;color:#374151;border:1px solid #d1d5db;border-radius:8px;padding:9px 16px;font-size:13px}
+  .detail-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:20px}
+  .detail-section-title{font-size:11px;font-weight:700;color:#6b7280;margin-bottom:8px;text-transform:uppercase;letter-spacing:.7px}
+  @media(max-width:900px){.form-grid-3,.form-grid-2,.detail-grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<div class="main-content">
+  <h2 class="sr-only">ХАБЭА — Хөдөлмөрийн аюулгүй байдал, эрүүл ахуй</h2>
+
+  <!-- Header -->
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+    <div>
+      <div style="font-size:20px;font-weight:700;color:#111827">ХАБЭА</div>
+      <div style="font-size:12px;color:#6b7280;margin-top:3px">Хөдөлмөрийн аюулгүй байдал, эрүүл ахуйн удирдлагын систем</div>
+    </div>
+    <button class="btn-primary" onclick="toggleForm()">+ Эрсдэл бүртгэх</button>
+  </div>
+
+  <!-- Dashboard Cards -->
+  <div class="dash-grid" id="dashCards"></div>
+
+  <!-- Safety Panel -->
+  <div style="margin-bottom:20px">
+    <div style="font-size:14px;font-weight:700;color:#374151;margin-bottom:10px">🛡️ Аюулгүй байдлын сануулга</div>
+    <div class="safety-grid">
+      <div class="safety-card" style="background:#fefce8;border-color:#fde047">
+        <div style="font-size:12px;font-weight:700;color:#92400e;margin-bottom:5px">⚡ Цахилгааны ажил</div>
+        <div style="font-size:11px;color:#92400e;line-height:1.6">Ажил эхлэхийн өмнө хүчдэлийг заавал салгах! LOCK-OUT/TAG-OUT журам дагаж мөрдөнө үү.</div>
+      </div>
+      <div class="safety-card" style="background:#eff6ff;border-color:#93c5fd">
+        <div style="font-size:12px;font-weight:700;color:#1e3a8a;margin-bottom:5px">🏗️ Өндрийн ажил</div>
+        <div style="font-size:11px;color:#1e3a8a;line-height:1.6">2м-ээс дээш өндөрт ажиллахад өндрийн бүс заавал. Шатны бэхэлгээ шалгаж баталгаажуулна уу.</div>
+      </div>
+      <div class="safety-card" style="background:#fff7ed;border-color:#fdba74">
+        <div style="font-size:12px;font-weight:700;color:#7c2d12;margin-bottom:5px">🚧 Зам дагуух ажил</div>
+        <div style="font-size:11px;color:#7c2d12;line-height:1.6">Конус, хашлага заавал байрлуулах. Гэрэлт хантааз өмсөх журам заавал биелүүлнэ.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Registration Form -->
+  <div class="form-card" id="riskForm">
+    <div style="font-size:15px;font-weight:700;color:#111827;margin-bottom:16px;padding-bottom:10px;border-bottom:1px solid #e5e7eb" id="formTitle">📋 Шинэ эрсдэл бүртгэх</div>
+
+    <div class="form-grid-3">
+      <div>
+        <label class="field-label">Байршил <span style="color:#ef4444">*</span></label>
+        <input type="text" id="fLoc" placeholder="Байршил оруулна уу">
+      </div>
+      <div>
+        <label class="field-label">Эрсдэлийн төрөл <span style="color:#ef4444">*</span></label>
+        <select id="fType">
+          <option value="">— Сонгоно уу —</option>
+          <option>Цахилгааны эрсдэл</option>
+          <option>Өндрийн эрсдэл</option>
+          <option>Гал түймрийн эрсдэл</option>
+          <option>Механик эрсдэл</option>
+          <option>Химийн эрсдэл</option>
+          <option>Зам тээврийн эрсдэл</option>
+          <option>Бусад</option>
+        </select>
+      </div>
+      <div>
+        <label class="field-label">Эрсдэлийн түвшин</label>
+        <select id="fLevel" onchange="updateLevelStyle()">
+          <option value="Бага">Бага</option>
+          <option value="Дунд">Дунд</option>
+          <option value="Өндөр">Өндөр</option>
+          <option value="Маш өндөр">Маш өндөр</option>
+        </select>
+      </div>
+    </div>
+
+    <div style="margin-bottom:12px">
+      <label class="field-label">Тайлбар</label>
+      <textarea id="fDesc" placeholder="Эрсдэлийн нарийвчилсан тайлбар..."></textarea>
+    </div>
+
+    <div style="margin-bottom:12px">
+      <label class="field-label">PPE хамгаалалтын хэрэгсэл</label>
+      <div class="ppe-wrap" id="ppeWrap">
+        <label class="ppe-label"><input type="checkbox" value="Каск" onchange="togglePPE(this)"> Каск</label>
+        <label class="ppe-label"><input type="checkbox" value="Бээлий" onchange="togglePPE(this)"> Бээлий</label>
+        <label class="ppe-label"><input type="checkbox" value="Хантааз" onchange="togglePPE(this)"> Хантааз</label>
+        <label class="ppe-label"><input type="checkbox" value="Хүчдэл шалгагч" onchange="togglePPE(this)"> Хүчдэл шалгагч</label>
+        <label class="ppe-label"><input type="checkbox" value="Конус" onchange="togglePPE(this)"> Конус</label>
+        <label class="ppe-label"><input type="checkbox" value="Өндрийн бүс" onchange="togglePPE(this)"> Өндрийн бүс</label>
+      </div>
+    </div>
+
+    <div class="form-grid-2">
+      <div>
+        <label class="field-label">Ажил эхлэхээс өмнөх заавар</label>
+        <textarea id="fInstr" placeholder="Аюулгүй байдлын заавар..."></textarea>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div>
+          <label class="field-label">Хариуцсан ажилтан <span style="color:#ef4444">*</span></label>
+          <input type="text" id="fWorker" placeholder="Ажилтны нэр">
+        </div>
+        <div>
+          <label class="field-label">Зөвшөөрлийн статус</label>
+          <select id="fStatus">
+            <option>Хүлээгдэж байна</option>
+            <option>Батлагдсан</option>
+            <option>Цуцлагдсан</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <input type="hidden" id="editingId" value="">
+    <div style="display:flex;gap:8px;padding-top:12px;border-top:1px solid #e5e7eb">
+      <button class="btn-primary" onclick="saveRisk()">Хадгалах</button>
+      <button class="btn-secondary" onclick="cancelForm()">Болих</button>
+    </div>
+  </div>
+
+  <!-- Risk Table -->
+  <div class="table-wrap">
+    <div class="table-head">
+      <div style="font-size:14px;font-weight:700;color:#111827">📊 Бүртгэлтэй эрсдэлүүд</div>
+      <div style="font-size:12px;color:#6b7280" id="totalCount">Нийт: 0</div>
+    </div>
+    <div style="overflow-x:auto">
+      <table>
+        <thead>
+          <tr>
+            <th>№</th><th>Байршил</th><th>Эрсдэлийн төрөл</th><th>Түвшин</th>
+            <th>Хариуцсан</th><th>Статус</th><th>Огноо</th><th>Үйлдэл</th>
+          </tr>
+        </thead>
+        <tbody id="riskTable"></tbody>
+      </table>
+    </div>
+    <div id="emptyMsg" style="padding:32px;text-align:center;color:#9ca3af;font-size:13px;display:none">Бүртгэлтэй эрсдэл байхгүй байна</div>
+  </div>
+
+  <div style="margin-top:12px;font-size:11px;color:#9ca3af;text-align:right">
+    Чойбалсан хөгжил ОНХЯУ · Smart City ERP · ХАБЭА модуль
+  </div>
+</div>
+
+<script>
+const RISK_LEVELS = {
+  "Бага":      {c:"#16a34a",bg:"#dcfce7",t:"#15803d"},
+  "Дунд":      {c:"#ca8a04",bg:"#fef9c3",t:"#a16207"},
+  "Өндөр":     {c:"#ea580c",bg:"#ffedd5",t:"#c2410c"},
+  "Маш өндөр": {c:"#dc2626",bg:"#fee2e2",t:"#b91c1c"}
+};
+const STATUS_MAP = {
+  "Хүлээгдэж байна": {bg:"#eff6ff",t:"#1d4ed8",b:"#bfdbfe"},
+  "Батлагдсан":       {bg:"#f0fdf4",t:"#15803d",b:"#bbf7d0"},
+  "Цуцлагдсан":       {bg:"#fef2f2",t:"#b91c1c",b:"#fecaca"}
+};
+const PPE_ALL = ["Каск","Бээлий","Хантааз","Хүчдэл шалгагч","Конус","Өндрийн бүс"];
+const TL_STEPS = [
+  {k:"registered",l:"Бүртгэв"},
+  {k:"ppe_checked",l:"PPE шалгав"},
+  {k:"approved",l:"Зөвшөөрөв"},
+  {k:"started",l:"Эхлэв"},
+  {k:"finished",l:"Дуусав"}
+];
+
+let risks = [
+  {id:1,loc:"1-р байр, 3-р давхар",type:"Цахилгааны эрсдэл",level:"Өндөр",desc:"Хуучин кабелийн холболт солих шаардлагатай байна.",ppe:["Каск","Бээлий","Хүчдэл шалгагч"],instr:"Ажлын өмнө хүчдэл заавал салгана. Хамгаалалтын бээлий өмсөж ажиллана.",worker:"Д.Болд",status:"Батлагдсан",tl:{registered:true,ppe_checked:true,approved:true,started:true,finished:false},date:"2025-05-10"},
+  {id:2,loc:"Гадна талбай, зүүн хэсэг",type:"Өндрийн эрсдэл",level:"Маш өндөр",desc:"Барилгын 5-р давхарт тойруулах хэрэгслийн засвар.",ppe:["Каск","Өндрийн бүс","Хантааз"],instr:"Өндрийн бүс, шатыг шалгаж хоёр ажилтантай ажиллана.",worker:"Б.Ганбаяр",status:"Хүлээгдэж байна",tl:{registered:true,ppe_checked:true,approved:false,started:false,finished:false},date:"2025-05-10"},
+  {id:3,loc:"Үндсэн зам, баруун вхад",type:"Зам тээврийн эрсдэл",level:"Дунд",desc:"Зам дагуух хоолойн засварын ажил.",ppe:["Хантааз","Конус"],instr:"Замын хаалтыг тавьсны дараа ажил эхлэнэ.",worker:"С.Мөнхбаяр",status:"Цуцлагдсан",tl:{registered:true,ppe_checked:false,approved:false,started:false,finished:false},date:"2025-05-08"}
+];
+let nextId = 4;
+let expandedId = null;
+
+function today() {
+  return new Date().toISOString().split("T")[0];
+}
+
+function badge(level) {
+  const l = RISK_LEVELS[level] || RISK_LEVELS["Бага"];
+  return `<span class="badge" style="background:${l.bg};color:${l.t};border-color:${l.c}">${level}</span>`;
+}
+function sbadge(status) {
+  const s = STATUS_MAP[status] || STATUS_MAP["Хүлээгдэж байна"];
+  return `<span class="badge" style="background:${s.bg};color:${s.t};border-color:${s.b}">${status}</span>`;
+}
+
+function tlHtml(tl) {
+  return `<div class="tl">${TL_STEPS.map((s,i) => {
+    const done = tl[s.k];
+    const nextDone = i < TL_STEPS.length-1 && tl[TL_STEPS[i+1].k];
+    return `<div class="tl-step">
+      <div style="display:flex;flex-direction:column;align-items:center">
+        <div class="tl-dot" style="background:${done?"#16a34a":"#f3f4f6"};border:2px solid ${done?"#16a34a":"#d1d5db"};color:${done?"#fff":"#9ca3af"}">${done?"✓":"○"}</div>
+        <div class="tl-lbl" style="color:${done?"#15803d":"#9ca3af"}">${s.l}</div>
+      </div>
+      ${i<TL_STEPS.length-1?`<div class="tl-line" style="background:${done&&nextDone?"#16a34a":"#e5e7eb"}"></div>`:""}
+    </div>`;
+  }).join("")}</div>`;
+}
+
+function renderDash() {
+  const todayC = risks.filter(r => r.date === today()).length || risks.length;
+  const pending = risks.filter(r => r.status === "Хүлээгдэж байна").length;
+  const critical = risks.filter(r => r.level === "Маш өндөр" || r.level === "Өндөр").length;
+  const ppeMiss = risks.filter(r => r.ppe.length < 3).length;
+  const cards = [
+    {title:"Өнөөдрийн эрсдэл",   v:todayC, icon:"⚠️", color:"#f59e0b", sub:"Нийт бүртгэлтэй"},
+    {title:"Хүлээгдэж буй зөвшөөрөл", v:pending, icon:"⏳", color:"#3b82f6", sub:"Батлуулах шаардлагатай"},
+    {title:"Critical ажил",       v:critical,icon:"🔴", color:"#ef4444", sub:"Өндөр + Маш өндөр"},
+    {title:"PPE дутуу",           v:ppeMiss, icon:"🦺", color:"#8b5cf6", sub:"3-аас доош PPE"}
+  ];
+  document.getElementById("dashCards").innerHTML = cards.map(c =>
+    `<div class="dash-card" style="border-top-color:${c.color}">
+      <div><span class="label">${c.title}</span><span class="icon">${c.icon}</span></div>
+      <div class="value">${c.v}</div>
+      <div class="sub">${c.sub}</div>
+    </div>`
+  ).join("");
+}
+
+function renderTable() {
+  const tbody = document.getElementById("riskTable");
+  document.getElementById("totalCount").textContent = "Нийт: " + risks.length;
+  if (risks.length === 0) {
+    tbody.innerHTML = "";
+    document.getElementById("emptyMsg").style.display = "block";
+    return;
+  }
+  document.getElementById("emptyMsg").style.display = "none";
+  tbody.innerHTML = risks.map((r, i) => {
+    const isExp = expandedId === r.id;
+    const actionBtns = `
+      <div style="display:flex;gap:4px;flex-wrap:wrap">
+        ${r.status==="Хүлээгдэж байна"?`<button class="act-btn" style="background:#f0fdf4;color:#15803d;border-color:#bbf7d0" onclick="event.stopPropagation();doApprove(${r.id})">Батлах</button>`:""}
+        ${r.status!=="Цуцлагдсан"?`<button class="act-btn" style="background:#fef2f2;color:#b91c1c;border-color:#fecaca" onclick="event.stopPropagation();doCancel(${r.id})">Цуцлах</button>`:""}
+        <button class="act-btn" style="background:#eff6ff;color:#1d4ed8;border-color:#bfdbfe" onclick="event.stopPropagation();doEdit(${r.id})">Засах</button>
+        <button class="act-btn" style="background:#f9fafb;color:#6b7280;border-color:#e5e7eb" onclick="event.stopPropagation();doDelete(${r.id})">Устгах</button>
+      </div>`;
+
+    const detailRow = isExp ? `
+      <tr class="detail-row"><td colspan="8" style="padding:16px 20px">
+        <div class="detail-grid">
+          <div>
+            <div class="detail-section-title">🦺 PPE Хэрэгсэл</div>
+            <div style="display:flex;flex-wrap:wrap;gap:5px">
+              ${PPE_ALL.map(item => {
+                const has = r.ppe.includes(item);
+                return `<span style="font-size:11px;padding:3px 9px;border-radius:5px;background:${has?"#dbeafe":"#f3f4f6"};color:${has?"#1d4ed8":"#9ca3af"};border:1px solid ${has?"#93c5fd":"#e5e7eb"};font-weight:${has?600:400}">${has?"✓ ":""}${item}</span>`;
+              }).join("")}
+            </div>
+          </div>
+          <div>
+            <div class="detail-section-title">📌 Ажлын заавар</div>
+            <div style="font-size:12px;color:#374151;background:#fff;padding:10px 12px;border-radius:8px;border:1px solid #e5e7eb;line-height:1.6">${r.instr||"—"}</div>
+            ${r.desc?`<div style="font-size:11px;color:#6b7280;margin-top:8px;line-height:1.5">📝 ${r.desc}</div>`:""}
+          </div>
+          <div>
+            <div class="detail-section-title">📅 Явц</div>
+            ${tlHtml(r.tl)}
+          </div>
+        </div>
+      </td></tr>` : "";
+
+    return `
+      <tr onclick="toggleExpand(${r.id})" style="${isExp?"background:#f0f9ff":""}">
+        <td style="color:#9ca3af;font-weight:500">${i+1}</td>
+        <td style="font-weight:500;color:#111827">${r.loc}</td>
+        <td style="color:#374151">${r.type}</td>
+        <td>${badge(r.level)}</td>
+        <td style="color:#374151">${r.worker}</td>
+        <td>${sbadge(r.status)}</td>
+        <td style="color:#9ca3af">${r.date}</td>
+        <td onclick="event.stopPropagation()">${actionBtns}</td>
+      </tr>
+      ${detailRow}`;
+  }).join("");
+}
+
+function render() { renderDash(); renderTable(); }
+
+// Form
+function toggleForm() {
+  const form = document.getElementById("riskForm");
+  const isOpen = form.classList.contains("open");
+  if (isOpen) { cancelForm(); return; }
+  clearForm();
+  document.getElementById("formTitle").textContent = "📋 Шинэ эрсдэл бүртгэх";
+  form.classList.add("open");
+}
+function cancelForm() {
+  document.getElementById("riskForm").classList.remove("open");
+  document.getElementById("editingId").value = "";
+  clearForm();
+}
+function clearForm() {
+  ["fLoc","fDesc","fInstr","fWorker"].forEach(id => document.getElementById(id).value = "");
+  document.getElementById("fType").value = "";
+  document.getElementById("fLevel").value = "Бага";
+  document.getElementById("fStatus").value = "Хүлээгдэж байна";
+  document.querySelectorAll("#ppeWrap input[type=checkbox]").forEach(cb => {
+    cb.checked = false;
+    cb.closest(".ppe-label").classList.remove("checked");
+  });
+}
+function togglePPE(cb) {
+  cb.closest(".ppe-label").classList.toggle("checked", cb.checked);
+}
+function getSelectedPPE() {
+  return [...document.querySelectorAll("#ppeWrap input[type=checkbox]:checked")].map(cb => cb.value);
+}
+function updateLevelStyle() {
+  const sel = document.getElementById("fLevel");
+  const l = RISK_LEVELS[sel.value] || RISK_LEVELS["Бага"];
+  sel.style.borderColor = l.c;
+}
+function saveRisk() {
+  const loc = document.getElementById("fLoc").value.trim();
+  const type = document.getElementById("fType").value;
+  const worker = document.getElementById("fWorker").value.trim();
+  if (!loc || !type || !worker) { alert("Байршил, төрөл болон ажилтны нэрийг заавал бөглөнө үү!"); return; }
+  const data = {
+    loc, type,
+    level: document.getElementById("fLevel").value,
+    desc: document.getElementById("fDesc").value.trim(),
+    ppe: getSelectedPPE(),
+    instr: document.getElementById("fInstr").value.trim(),
+    worker,
+    status: document.getElementById("fStatus").value
+  };
+  const editId = parseInt(document.getElementById("editingId").value);
+  if (editId) {
+    risks = risks.map(r => r.id === editId ? {...r, ...data} : r);
+  } else {
+    risks.push({...data, id: nextId++, date: today(), tl:{registered:true,ppe_checked:false,approved:false,started:false,finished:false}});
+  }
+  cancelForm();
+  render();
+}
+function doEdit(id) {
+  const r = risks.find(x => x.id === id);
+  document.getElementById("fLoc").value = r.loc;
+  document.getElementById("fType").value = r.type;
+  document.getElementById("fLevel").value = r.level;
+  document.getElementById("fDesc").value = r.desc;
+  document.getElementById("fInstr").value = r.instr;
+  document.getElementById("fWorker").value = r.worker;
+  document.getElementById("fStatus").value = r.status;
+  document.getElementById("editingId").value = r.id;
+  document.querySelectorAll("#ppeWrap input[type=checkbox]").forEach(cb => {
+    cb.checked = r.ppe.includes(cb.value);
+    cb.closest(".ppe-label").classList.toggle("checked", cb.checked);
+  });
+  updateLevelStyle();
+  document.getElementById("formTitle").textContent = "✏️ Эрсдэл засах";
+  document.getElementById("riskForm").classList.add("open");
+  window.scrollTo({top:0,behavior:"smooth"});
+}
+function doDelete(id) {
+  if (!confirm("Энэ эрсдэлийг устгах уу?")) return;
+  risks = risks.filter(r => r.id !== id);
+  if (expandedId === id) expandedId = null;
+  render();
+}
+function doApprove(id) {
+  risks = risks.map(r => r.id===id ? {...r, status:"Батлагдсан", tl:{...r.tl,approved:true}} : r);
+  render();
+}
+function doCancel(id) {
+  risks = risks.map(r => r.id===id ? {...r, status:"Цуцлагдсан"} : r);
+  render();
+}
+function toggleExpand(id) {
+  expandedId = expandedId === id ? null : id;
+  renderTable();
+}
+
+render();
+</script>
+</body>
+</html>

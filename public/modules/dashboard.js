@@ -1,8 +1,117 @@
-import { api, today, table, state } from "./common.js";
+import { api, today, table, state, escapeHtml } from "./common.js";
+
+// ── Weather code → [emoji, Mongolian label] ──
+const WX_CODE = {
+  113:['☀️','Цэлмэг'],116:['⛅','Хэсэгчилсэн үүлтэй'],119:['☁️','Үүлтэй'],
+  122:['☁️','Бүрхэг'],143:['🌫️','Манантай'],176:['🌦️','Хагас бороо'],
+  179:['🌨️','Хагас цас'],182:['🌧️','Шиврээ хур'],185:['🌧️','Хөлдүү шиврээ'],
+  200:['⛈️','Аадар бороо'],227:['🌨️','Хийн шуурга'],230:['🌨️','Цасан шуурга'],
+  248:['🌫️','Манан'],260:['🌫️','Хөлдүү манан'],263:['🌦️','Шиврээ'],
+  266:['🌦️','Шиврээ бороо'],281:['🌧️','Хөлдүү шиврээ'],284:['🌧️','Хөлдүү шиврээ'],
+  293:['🌧️','Жаахан бороо'],296:['🌧️','Бороо'],299:['🌧️','Дунд бороо'],
+  302:['🌧️','Дунд бороо'],305:['🌧️','Хүчтэй бороо'],308:['🌧️','Хүчтэй бороо'],
+  311:['🌧️','Мөсөн бороо'],314:['🌧️','Мөсөн бороо'],317:['🌧️','Мөсөн бороо'],
+  320:['🌨️','Цас бороо'],323:['🌨️','Цас'],326:['🌨️','Цас'],329:['❄️','Цас'],
+  332:['❄️','Цас'],335:['❄️','Хүчтэй цас'],338:['❄️','Хүчтэй цас'],
+  350:['🌧️','Мөсний бөмбөлөг'],353:['🌦️','Бороо'],356:['🌧️','Бороо'],
+  359:['🌧️','Хүчтэй бороо'],362:['🌨️','Цас'],365:['🌨️','Цас'],
+  368:['❄️','Хүчтэй цас'],371:['❄️','Хүчтэй цас'],374:['🌧️','Мөсний бөмбөлөг'],
+  377:['🌧️','Мөсний бөмбөлөг'],386:['⛈️','Аадар'],389:['⛈️','Аадар бороо'],
+  392:['⛈️','Аадар'],395:['⛈️','Аадар цас'],
+};
+
+// ── Mongolian month ordinal names (1-based) ──
+const MN_MON = ['','Нэгдүгээр','Хоёрдугаар','Гуравдугаар','Дөрөвдүгээр',
+  'Тавдугаар','Зургаадугаар','Долдугаар','Наймдугаар','Есдүгээр',
+  'Аравдугаар','Арваннэгдүгээр','Арванхоёрдугаар'];
+
+// ── Weekday names (Sun=0) ──
+const MN_WD = ['Ням','Даваа','Мягмар','Лхагва','Пүрэв','Баасан','Бямба'];
+
+// ── Chinese/Mongolian New Year dates ──
+const LUNAR_YRS = [
+  { cny: new Date('2023-01-22'), el:'Хар',    an:'Туулай' },
+  { cny: new Date('2024-02-10'), el:'Модон',  an:'Луу'    },
+  { cny: new Date('2025-01-29'), el:'Модон',  an:'Могой'  },
+  { cny: new Date('2026-02-17'), el:'Галт',   an:'Морь'   },
+  { cny: new Date('2027-02-06'), el:'Галт',   an:'Хонь'   },
+  { cny: new Date('2028-01-26'), el:'Газрын', an:'Бич'    },
+  { cny: new Date('2029-02-13'), el:'Газрын', an:'Тахиа'  },
+];
+
+function getLunarDate(d) {
+  const SYNODIC = 29.530588861;
+  let yr = LUNAR_YRS[0];
+  for (const ly of LUNAR_YRS) { if (d >= ly.cny) yr = ly; else break; }
+  const diff = (d - yr.cny) / 86400000;
+  const mIdx = Math.floor(diff / SYNODIC);
+  const day  = Math.floor(diff - mIdx * SYNODIC) + 1;
+  return { yearName: `${yr.el} ${yr.an}`, month: mIdx + 1, day };
+}
+
+async function fetchWeather() {
+  try {
+    const r = await fetch('https://wttr.in/Choibalsan?format=j1');
+    if (!r.ok) return null;
+    const d = await r.json();
+    const c = d.current_condition[0];
+    const code = Number(c.weatherCode);
+    const [icon, desc] = WX_CODE[code] || ['🌤️','Мэдэгдэхгүй'];
+    return { icon, desc, temp: c.temp_C, feels: c.FeelsLikeC, wind: c.windspeedKmph, hum: c.humidity };
+  } catch { return null; }
+}
+
+function renderWeather(w) {
+  const el = document.getElementById('wcWeather');
+  if (!el) return;
+  if (w) {
+    el.innerHTML = `
+      <div class="wc-label">🌡️ ЦАГ АГААР · ЧОЙБАЛСАН, ДОРНОД</div>
+      <div class="wc-weather-row">
+        <span class="wc-wicon">${w.icon}</span>
+        <span class="wc-temp">${w.temp}°C</span>
+        <span class="wc-cond">${w.desc}</span>
+      </div>
+      <div class="wc-sub">💧 Чийг ${w.hum}% &nbsp;·&nbsp; 💨 ${w.wind} км/ц &nbsp;·&nbsp; 🌡️ Мэдрэгдэх ${w.feels}°C</div>`;
+  } else {
+    el.innerHTML = `
+      <div class="wc-label">🌡️ ЦАГ АГААР · ЧОЙБАЛСАН</div>
+      <div class="wc-main" style="color:var(--ink3)">Интернэт холболт байхгүй</div>
+      <div class="wc-sub">Локал сүлжээнд ажиллаж байна</div>`;
+  }
+}
+
+function updateWcBar() {
+  const now = new Date();
+  const gEl = document.getElementById('wcGreg');
+  if (gEl) {
+    gEl.innerHTML = `
+      <div class="wc-label">📅 ОН САРЫН ТООЛЛОЛ</div>
+      <div class="wc-main">${now.getFullYear()} оны ${MN_MON[now.getMonth()+1]} сарын ${now.getDate()}</div>
+      <div class="wc-sub">${MN_WD[now.getDay()]} гараг</div>`;
+  }
+  // Org info rendered separately via renderOrgInfo()
+}
 
 export async function dashboard() {
   const s = await api(`/api/reports/summary?year=${new Date().getFullYear()}`);
+  let myTasks = [];
+  try { myTasks = await api("/api/my-tasks"); } catch(e) {}
+  let myRisks = [];
+  try {
+    const allRisks = await api('/api/safety-reports');
+    myRisks = allRisks.filter(r =>
+      r.assigned_to === state.me?.id &&
+      (r.workflow_status || 'Шинэ') !== 'Хаасан'
+    );
+  } catch(e) {}
   const totalWork     = s.work.count || 0;
+  let expiringDocs = [];
+  try { expiringDocs = (await api("/api/documents/expiring?days=30")) || []; } catch(e) {}
+  let upcomingReports = [];
+  try { upcomingReports = (await api("/api/report-schedules/upcoming")) || []; } catch(e) {}
+  let gerStats = { total_ger: 0, total_camhag: 0, total_broken: 0, sl_poles: 0, sl_heads: 0 };
+  try { gerStats = await api("/api/sl-ger-stats"); } catch(e) {}
   const workCost      = Math.round(s.work.total_cost || 0);
   const financeCost   = Math.round(s.expenses.total || 0);
   const avgProgress   = Math.round(s.work.avg_progress || 0);
@@ -46,7 +155,7 @@ export async function dashboard() {
   <!-- ═══ HERO ═══ -->
   <div class="hero">
     <div style="display:flex;align-items:center;gap:16px;position:relative;z-index:1">
-      <img src="logo.jpg" class="heroLogo" onerror="this.style.display='none'">
+      <img src="/logo.jpg" class="heroLogo" onerror="this.style.display='none'">
       <div class="hero-text">
         <h1>Чойбалсан хөгжил ОНӨҮГ</h1>
         <p class="sub">Дотоод ажил · Тайлан · Төлөвлөгөөний ERP систем</p>
@@ -57,6 +166,18 @@ export async function dashboard() {
       <div id="liveClock"></div>
       <div class="weather">Чойбалсан хот · ERP ONLINE</div>
     </div>
+  </div>
+
+  <!-- ═══ WEATHER + CALENDAR BAR ═══ -->
+  <div class="wc-bar">
+    <div class="wc-section" id="wcWeather">
+      <div class="wc-label">🌡️ ЦАГ АГААР · ЧОЙБАЛСАН, ДОРНОД</div>
+      <div class="wc-main" style="color:var(--ink3)">Ачаалж байна...</div>
+    </div>
+    <div class="wc-divider"></div>
+    <div class="wc-section" id="wcGreg"></div>
+    <div class="wc-divider"></div>
+    <div class="wc-section" id="wcOrg" style="cursor:default"></div>
   </div>
 
   <!-- ═══ STATS ROW ═══ -->
@@ -75,7 +196,7 @@ export async function dashboard() {
         <div class="stat-icon">✅</div>
       </div>
       <div class="stat-value">${todayAtt.worked}</div>
-      <div class="stat-sub">${attPct}% ирэлт</div>
+      <div class="stat-sub">${attPct}% ирц</div>
     </div>
     <div class="stat-card red">
       <div class="stat-top">
@@ -106,24 +227,24 @@ export async function dashboard() {
         </div>
       </div>
     </div>
-    <div class="stat-card ${matWarnings.length?'red':'green'}">
+    <div class="stat-card ${(matWarnings.length||expiringDocs.length||upcomingReports.length)?'red':'green'}">
       <div class="stat-top">
-        <span class="stat-label">Материал анхааруулга</span>
-        <div class="stat-icon">${matWarnings.length?'⚠️':'📦'}</div>
+        <span class="stat-label">Анхааруулга</span>
+        <div class="stat-icon">${(matWarnings.length||expiringDocs.length)?'⚠️':'✅'}</div>
       </div>
-      <div class="stat-value">${matWarnings.length}</div>
-      <div class="stat-sub">${matWarnings.length?'Бага үлдэгдэлтэй':'Хэвийн байдалтай'}</div>
+      <div class="stat-value">${matWarnings.length + expiringDocs.length + upcomingReports.length}</div>
+      <div class="stat-sub">${[matWarnings.length?'Материал':'', expiringDocs.length?'Баримт':'', upcomingReports.length?'Тайлан':''].filter(Boolean).join(' · ')||'Хэвийн байдалтай'}</div>
     </div>
   </div>
 
   <!-- ═══ MAIN CONTENT GRID ═══ -->
   <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:16px">
 
-    <!-- Өнөөдрийн ирэвсэл -->
+    <!-- Өнөөдрийн ирц -->
     <div class="panel">
       <div class="panel-head">
         <div>
-          <h3>⏱ Өнөөдрийн ирэвсэл</h3>
+          <h3>⏱ Өнөөдрийн ирц</h3>
           <div class="subtitle">${todayStr}</div>
         </div>
         <button class="btn sm secondary" onclick="show('attendance')">Бүртгэх →</button>
@@ -149,7 +270,7 @@ export async function dashboard() {
         <!-- Attendance progress -->
         <div class="progress-wrap">
           <div class="progress-label">
-            <span>Ирэлтийн хувь</span>
+            <span>Ирцийн хувь</span>
             <span style="font-weight:700">${attPct}%</span>
           </div>
           <div class="progress-bar">
@@ -158,32 +279,165 @@ export async function dashboard() {
           </div>
         </div>
         ${notRecorded>0?`<div class="alertItem warn" style="margin-top:10px;padding:8px 10px;font-size:12px">
-          ⚠ ${notRecorded} ажилтны ирэвсэл бүртгэгдээгүй байна</div>`:''}
+          ⚠ ${notRecorded} ажилтны ирц бүртгэгдээгүй байна</div>`:''}
       </div>
     </div>
 
-    <!-- Smart City Status -->
+    <!-- Гэрэлтүүлгийн тойм -->
     <div class="panel">
       <div class="panel-head">
         <div>
-          <h3>🏙 Smart City статус</h3>
-          <div class="subtitle">Онлайн мэдээлэл</div>
+          <h3>💡 Гэрэлтүүлгийн тойм</h3>
+          <div class="subtitle">Нийт бүртгэлтэй гэрлүүд</div>
         </div>
-        <span class="pill ok" style="font-size:10px">ONLINE</span>
+        ${(() => {
+          const slPct      = (gerStats.sl_heads||0)    > 0 ? (gerStats.sl_heads    - (gerStats.sl_broken||0))    / gerStats.sl_heads    * 100 : 100;
+          const gerPct     = (gerStats.total_ger||0)   > 0 ? (gerStats.total_ger   - (gerStats.ger_broken||0))   / gerStats.total_ger   * 100 : 100;
+          const camPct     = (gerStats.total_camhag||0)> 0 ? (gerStats.total_camhag- (gerStats.camhag_broken||0))/ gerStats.total_camhag* 100 : 100;
+          const trafficPct = (gerStats.traffic_total||0)> 0 ? (gerStats.traffic_asaaltai||0) / gerStats.traffic_total * 100 : null;
+          const parts      = [slPct, gerPct, camPct, ...(trafficPct !== null ? [trafficPct] : [])];
+          const avg        = (parts.reduce((s,v)=>s+v,0) / parts.length).toFixed(1);
+          const col        = avg >= 90 ? 'ok' : avg >= 70 ? 'warn' : 'bad';
+          return `<span class="pill ${col}" style="font-size:11px;font-weight:800">⚡ ${avg}% асалттай</span>`;
+        })()}
       </div>
-      <div class="panel-body" style="padding-top:12px">
-        ${[
-          ['💡','Гэрэлтүүлэг','4,332 бүртгэлтэй','ok'],
-          ['🎥','Камер','191 камер','ok'],
-          ['🚦','Гэрлэн дохио','12 байршил','warn'],
-          ['🌐','Backend','ONLINE','ok'],
-          ['📡','LoRaWAN','ChirpStack онлайн','ok'],
-          ['⚡','Эрчим хүч','Хэвийн','ok'],
-        ].map(([ic,lb,vl,st])=>`
-          <div class="status-row">
-            <span class="status-name"><span class="status-icon">${ic}</span>${lb}</span>
-            <b class="${st==='ok'?'okText':'warnText'}">${vl}</b>
-          </div>`).join('')}
+      <div class="panel-body" style="padding-top:4px">
+        <div style="border-bottom:1px solid #f1f5f9;padding:8px 0 10px">
+          <div style="font-size:12px;font-weight:700;color:#344054;margin-bottom:8px">
+            <span style="margin-right:6px">🛣️</span>Авто замын гэрэл
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px">
+            ${[
+              [gerStats.sl_streets||0,  'Нийт гудамж',    '#f59e0b','#fffbeb'],
+              [gerStats.sl_poles||0,    'Нийт шон',        '#2563eb','#eff6ff'],
+              [gerStats.sl_heads||0,    'Нийт толгой',     '#0ea5e9','#f0f9ff'],
+              [(gerStats.sl_heads||0) - (gerStats.sl_broken||0), 'Асаж байна', '#16a34a','#f0fdf4'],
+              [gerStats.sl_needs_poles||0,'Нөхөх шон',    '#d97706','#fff7ed'],
+              [(() => {
+                const h = gerStats.sl_heads||0;
+                const b = gerStats.sl_broken||0;
+                const pct = h>0 ? ((h-b)/h*100).toFixed(1) : '100.0';
+                return pct+'%';
+              })(),                     'Асалтын хувь',    (() => {
+                const h = gerStats.sl_heads||0, b = gerStats.sl_broken||0;
+                const p = h>0 ? (h-b)/h*100 : 100;
+                return p>=90?'#16a34a':p>=70?'#d97706':'#dc2626';
+              })(),                                         (() => {
+                const h = gerStats.sl_heads||0, b = gerStats.sl_broken||0;
+                const p = h>0 ? (h-b)/h*100 : 100;
+                return p>=90?'#f0fdf4':p>=70?'#fff7ed':'#fef2f2';
+              })()],
+              [gerStats.sl_broken||0,   'Гэмтэлтэй',      '#dc2626','#fef2f2'],
+              [gerStats.sl_active||0,   'Идэвхтэй',        '#8b5cf6','#f5f3ff'],
+            ].map(([val,label,color,bg])=>`
+              <div style="background:${bg};border-radius:8px;padding:6px 8px;text-align:center">
+                <div style="font-size:15px;font-weight:800;color:${color};line-height:1.2">${typeof val==='number'?val.toLocaleString():val}</div>
+                <div style="font-size:9px;color:#64748b;margin-top:1px">${label}</div>
+              </div>`).join('')}
+          </div>
+        </div>
+        <div style="border-bottom:1px solid #f1f5f9;padding:8px 0 10px">
+          <div style="font-size:12px;font-weight:700;color:#344054;margin-bottom:8px">
+            <span style="margin-right:6px">🏘️</span>Гэр хорооллын гэрэл
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px">
+            ${[
+              [gerStats.ger_locations||0,  'Байршил',         '#8b5cf6','#f5f3ff'],
+              [gerStats.total_ger||0,      'Нийт шон',        '#2563eb','#eff6ff'],
+              [(gerStats.total_ger||0) - (gerStats.ger_broken||0), 'Асаж байна', '#16a34a','#f0fdf4'],
+              [(() => {
+                const h = gerStats.total_ger||0;
+                const b = gerStats.ger_broken||0;
+                const pct = h>0 ? ((h-b)/h*100).toFixed(1) : '100.0';
+                return pct+'%';
+              })(),                        'Асалтын хувь',     (() => {
+                const h = gerStats.total_ger||0, b = gerStats.ger_broken||0;
+                const p = h>0 ? (h-b)/h*100 : 100;
+                return p>=90?'#16a34a':p>=70?'#d97706':'#dc2626';
+              })(),                                              (() => {
+                const h = gerStats.total_ger||0, b = gerStats.ger_broken||0;
+                const p = h>0 ? (h-b)/h*100 : 100;
+                return p>=90?'#f0fdf4':p>=70?'#fff7ed':'#fef2f2';
+              })()],
+              [gerStats.ger_broken||0,     'Гэмтэлтэй',       '#dc2626','#fef2f2'],
+            ].map(([val,label,color,bg])=>`
+              <div style="background:${bg};border-radius:8px;padding:6px 8px;text-align:center">
+                <div style="font-size:14px;font-weight:800;color:${color};line-height:1.2">${typeof val==='number'?val.toLocaleString():val}</div>
+                <div style="font-size:9px;color:#64748b;margin-top:1px">${label}</div>
+              </div>`).join('')}
+          </div>
+        </div>
+        <div style="padding:8px 0 10px">
+          <div style="font-size:12px;font-weight:700;color:#344054;margin-bottom:8px">
+            <span style="margin-right:6px">🗼</span>Цамхаг / прожектор
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px">
+            ${[
+              [gerStats.camhag_locations||0, 'Байршил',         '#0891b2','#ecfeff'],
+              [gerStats.total_camhag||0,     'Нийт шон',        '#2563eb','#eff6ff'],
+              [(gerStats.total_camhag||0) - (gerStats.camhag_broken||0), 'Асаж байна', '#16a34a','#f0fdf4'],
+              [(() => {
+                const h = gerStats.total_camhag||0;
+                const b = gerStats.camhag_broken||0;
+                const pct = h>0 ? ((h-b)/h*100).toFixed(1) : '100.0';
+                return pct+'%';
+              })(),                          'Асалтын хувь',     (() => {
+                const h = gerStats.total_camhag||0, b = gerStats.camhag_broken||0;
+                const p = h>0 ? (h-b)/h*100 : 100;
+                return p>=90?'#16a34a':p>=70?'#d97706':'#dc2626';
+              })(),                                               (() => {
+                const h = gerStats.total_camhag||0, b = gerStats.camhag_broken||0;
+                const p = h>0 ? (h-b)/h*100 : 100;
+                return p>=90?'#f0fdf4':p>=70?'#fff7ed':'#fef2f2';
+              })()],
+              [gerStats.camhag_broken||0,    'Гэмтэлтэй',       '#dc2626','#fef2f2'],
+            ].map(([val,label,color,bg])=>`
+              <div style="background:${bg};border-radius:8px;padding:6px 8px;text-align:center">
+                <div style="font-size:14px;font-weight:800;color:${color};line-height:1.2">${typeof val==='number'?val.toLocaleString():val}</div>
+                <div style="font-size:9px;color:#64748b;margin-top:1px">${label}</div>
+              </div>`).join('')}
+          </div>
+        </div>
+        ${(gerStats.traffic_total||0) > 0 ? `
+        <div style="border-top:1px solid #f1f5f9;padding:8px 0 10px;margin-top:4px">
+          <div style="font-size:12px;font-weight:700;color:#344054;margin-bottom:8px">
+            <span style="margin-right:6px">🚦</span>Гэрлэн дохио
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px">
+            ${[
+              [gerStats.traffic_total||0,    'Нийт дохио',     '#10b981','#f0fdf4'],
+              [gerStats.traffic_asaaltai||0, 'Асаж байна', '#16a34a','#dcfce7'],
+              [(gerStats.traffic_total||0) - (gerStats.traffic_asaaltai||0), 'Гэмтэлтэй', '#dc2626','#fef2f2'],
+              [(() => {
+                const t = gerStats.traffic_total||0, a = gerStats.traffic_asaaltai||0;
+                const pct = t>0 ? (a/t*100).toFixed(1) : '0.0';
+                return pct+'%';
+              })(),                          'Асалтын хувь',   (() => {
+                const t = gerStats.traffic_total||0, a = gerStats.traffic_asaaltai||0;
+                const p = t>0 ? a/t*100 : 0;
+                return p>=90?'#16a34a':p>=70?'#d97706':'#dc2626';
+              })(),                                              (() => {
+                const t = gerStats.traffic_total||0, a = gerStats.traffic_asaaltai||0;
+                const p = t>0 ? a/t*100 : 0;
+                return p>=90?'#f0fdf4':p>=70?'#fff7ed':'#fef2f2';
+              })()],
+            ].map(([val,label,color,bg])=>`
+              <div style="background:${bg};border-radius:8px;padding:6px 8px;text-align:center">
+                <div style="font-size:15px;font-weight:800;color:${color};line-height:1.2">${typeof val==='number'?val.toLocaleString():val}</div>
+                <div style="font-size:9px;color:#64748b;margin-top:1px">${label}</div>
+              </div>`).join('')}
+          </div>
+        </div>` : ''}
+        ${gerStats.total_broken > 0 ? `
+        <div class="alertItem bad" style="padding:8px 10px;font-size:12px;margin-top:8px">
+          <span>⚠️</span>
+          <div><b>${gerStats.total_broken}</b> толгой гэмтэлтэй байна —
+            <a href="#" onclick="show('assets')" style="font-size:11px">Дэлгэрэнгүй →</a>
+          </div>
+        </div>` : `
+        <div class="alertItem good" style="padding:8px 10px;font-size:12px;margin-top:8px">
+          <span>✅</span><span>Бүх гэрэл хэвийн ажиллаж байна</span>
+        </div>`}
       </div>
     </div>
 
@@ -194,25 +448,49 @@ export async function dashboard() {
           <h3>⚠️ Warning Center</h3>
           <div class="subtitle">Анхааруулга, мэдэгдэл</div>
         </div>
-        ${matWarnings.length?`<span class="pill bad">${matWarnings.length} анхааруулга</span>`:`<span class="pill ok">Хэвийн</span>`}
+        ${(matWarnings.length||expiringDocs.length||upcomingReports.length)
+          ? `<span class="pill bad">${matWarnings.length+expiringDocs.length+upcomingReports.length} анхааруулга</span>`
+          : `<span class="pill ok">Хэвийн</span>`}
       </div>
       <div class="panel-body" style="padding-top:12px">
+        ${expiringDocs.length ? expiringDocs.map(d => {
+            const dl = Number(d.days_left);
+            const cls = dl <= 7 ? 'bad' : 'warn';
+            const label = dl <= 0 ? 'Хугацаа дууссан!' : `${dl} хоног үлдсэн`;
+            return `<div class="alertItem ${cls}" style="padding:9px 12px;font-size:12px">
+              <span>📄</span>
+              <div><b>${d.title}</b> — ${d.doc_type}<br>
+                <span style="color:var(--ink3)">${label} · ${d.valid_until}</span>
+              </div>
+            </div>`;
+          }).join('') : ''}
         ${matWarnings.length
           ? matWarnings.map(x=>`
-            <div class="alertItem bad" style="padding:9px 12px;font-size:12px">
+            <div class="alertItem bad" style="padding:9px 12px;font-size:12px${expiringDocs.length?';margin-top:6px':''}">
               <span>⚠️</span>
               <div><b>${x.item_name}</b> — үлдэгдэл бага: <b>${x.balance}</b></div>
             </div>`).join('')
-          : `<div class="alertItem good" style="padding:9px 12px;font-size:12px">
-              <span>✅</span><span>Материалын ноцтой анхааруулга байхгүй</span></div>`
+          : !expiringDocs.length
+            ? `<div class="alertItem good" style="padding:9px 12px;font-size:12px">
+                <span>✅</span><span>Материалын ноцтой анхааруулга байхгүй</span></div>`
+            : ''
         }
+        ${upcomingReports.length ? upcomingReports.map(r => {
+            const due  = new Date(r.next_due);
+            const diff = Math.ceil((due - new Date().setHours(0,0,0,0)) / 86400000);
+            const cls  = diff <= 0 ? 'bad' : diff <= 3 ? 'bad' : 'warn';
+            const lbl  = diff < 0 ? `${Math.abs(diff)} хоног хэтэрсэн!` : diff === 0 ? 'Өнөөдөр!' : `${diff} хоног үлдсэн`;
+            return `<div class="alertItem ${cls}" style="padding:9px 12px;font-size:12px;margin-top:6px;cursor:pointer" onclick="show('reports')">
+              <span>📋</span>
+              <div><b>${r.name}</b> <span style="color:var(--ink3);font-size:10px">(${r.frequency})</span><br>
+                <span style="color:var(--ink3)">${lbl} · ${r.next_due}${r.responsible?' · '+r.responsible:''}</span>
+              </div>
+            </div>`;
+          }).join('') : ''}
         ${todayAtt.absent>0?`
           <div class="alertItem warn" style="padding:9px 12px;font-size:12px;margin-top:6px">
             <span>👤</span><span>Өнөөдөр <b>${todayAtt.absent}</b> ажилтан ирээгүй байна</span>
           </div>`:''}
-        <div class="alertItem" style="padding:9px 12px;font-size:12px;margin-top:6px">
-          <span>📌</span><span>Хугацаа хэтэрсэн task дараагийн хувилбарт орно</span>
-        </div>
       </div>
     </div>
 
@@ -271,7 +549,7 @@ export async function dashboard() {
       <div class="panel-body">
         <div class="quick-actions" style="grid-template-columns:1fr 1fr">
           ${[
-            ['⏱','Ирэвсэл бүртгэх','attendance'],
+            ['⏱','Ирц бүртгэх','attendance'],
             ['🛠','Ажил нэмэх','work'],
             ['📦','Материал','materials'],
             ['💰','Зардал','expenses'],
@@ -354,12 +632,114 @@ export async function dashboard() {
       </div>
     </div>
 
-  </div>`;
+  </div>
 
-  // Clock update
-  if (state.clockTimer) clearInterval(state.clockTimer);
+  ${myTasks.length > 0 ? `
+  <!-- ═══ МИНИЙ ДААЛГАВАР ═══ -->
+  <div style="margin-top:20px">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+      <span style="font-size:15px;font-weight:800;color:#1e293b">👤 Миний даалгаврууд</span>
+      <span style="background:#ede9fe;color:#4f46e5;font-size:11px;font-weight:700;padding:2px 10px;border-radius:20px">${myTasks.length} ажил</span>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px">
+      ${myTasks.map(t => {
+        const pct  = Number(t.progress) || 0;
+        const stC  = t.status === 'Дууссан' ? '#16a34a' : t.status === 'Явцтай' ? '#2563eb' : '#94a3b8';
+        const stBg = t.status === 'Дууссан' ? '#f0fdf4' : t.status === 'Явцтай' ? '#eff6ff' : '#f8f9fb';
+        return `
+        <div style="background:#fff;border:1px solid #e2e6ed;border-radius:12px;padding:14px 16px;border-left:3px solid ${stC}">
+          <div style="font-size:10px;color:#94a3b8;font-weight:600;margin-bottom:4px">${escapeHtml(t.category||'')} · ${escapeHtml(t.work_title||'')}</div>
+          <div style="font-size:13px;font-weight:700;color:#1e293b;margin-bottom:8px">${escapeHtml(t.title)}</div>
+          ${t.location ? `<div style="font-size:11px;color:#2563eb;margin-bottom:6px">📍 ${escapeHtml(t.location)}</div>` : ''}
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+            <span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;background:${stBg};color:${stC}">${t.status}</span>
+            <span style="font-size:12px;font-weight:700;color:${stC}">${pct}%</span>
+          </div>
+          <div style="height:5px;background:#f1f5f9;border-radius:3px;overflow:hidden">
+            <div style="height:100%;width:${pct}%;background:${stC};border-radius:3px;transition:width .3s"></div>
+          </div>
+          ${t.end_date ? `<div style="font-size:10px;color:#94a3b8;margin-top:6px">⏰ Дуусах: ${t.end_date.slice(0,10)}</div>` : ''}
+        </div>`;
+      }).join('')}
+    </div>
+  </div>` : ''}
+
+  ${myRisks.length > 0 ? `
+  <!-- ═══ МИНИЙ ХАБЭА ЭРСДЭЛ ═══ -->
+  <div style="margin-top:20px">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+      <span style="font-size:15px;font-weight:800;color:#1e293b">🦺 Миний ХАБЭА эрсдэл</span>
+      <span style="background:#fee2e2;color:#dc2626;font-size:11px;font-weight:700;padding:2px 10px;border-radius:20px">${myRisks.length} нээлттэй</span>
+      <button onclick="show('safety')" style="margin-left:auto;padding:5px 14px;border-radius:8px;font-size:12px;font-weight:700;background:#fff;border:1.5px solid #e2e6ed;color:#374151;cursor:pointer">ХАБЭА руу очих →</button>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px">
+      ${myRisks.map(r => {
+        const wf = r.workflow_status || 'Шинэ';
+        const lvColors = {
+          'Бага':      ['#dcfce7','#16a34a'],
+          'Дунд':      ['#fef9c3','#ca8a04'],
+          'Өндөр':     ['#ffedd5','#ea580c'],
+          'Маш өндөр': ['#fee2e2','#dc2626'],
+        };
+        const wfColors = {
+          'Шинэ':               ['#eff6ff','#2563eb'],
+          'Танилцсан':          ['#f0fdf4','#16a34a'],
+          'Арга хэмжээ өгсөн': ['#fefce8','#ca8a04'],
+          'Хэрэгжиж байна':    ['#fff7ed','#ea580c'],
+          'Хаасан':            ['#f1f5f9','#374151'],
+        };
+        const [lvBg, lvColor] = lvColors[r.risk_level] || ['#f1f5f9','#64748b'];
+        const [wfBg, wfColor] = wfColors[wf] || ['#f1f5f9','#64748b'];
+        const borderColor = r.risk_level === 'Маш өндөр' ? '#dc2626'
+          : r.risk_level === 'Өндөр' ? '#ea580c'
+          : r.risk_level === 'Дунд'  ? '#ca8a04' : '#16a34a';
+
+        // Deadline countdown
+        let cdHtml = '';
+        if (r.deadline) {
+          const now = new Date(); now.setHours(0,0,0,0);
+          const dl = new Date(r.deadline);
+          const days = Math.ceil((dl - now) / 86400000);
+          if (days < 0) cdHtml = `<div style="font-size:11px;font-weight:700;color:#dc2626;background:#fee2e2;padding:3px 8px;border-radius:6px;display:inline-block">${Math.abs(days)} хоног хэтэрсэн ⚠️</div>`;
+          else if (days === 0) cdHtml = `<div style="font-size:11px;font-weight:700;color:#ea580c;background:#ffedd5;padding:3px 8px;border-radius:6px;display:inline-block">Өнөөдөр дуусна 🔥</div>`;
+          else if (days === 1) cdHtml = `<div style="font-size:11px;font-weight:700;color:#ea580c;background:#ffedd5;padding:3px 8px;border-radius:6px;display:inline-block">Маргааш дуусна ⏱</div>`;
+          else if (days <= 3) cdHtml = `<div style="font-size:11px;font-weight:700;color:#ca8a04;background:#fefce8;padding:3px 8px;border-radius:6px;display:inline-block">${days} хоног үлдсэн</div>`;
+          else cdHtml = `<div style="font-size:11px;color:#94a3b8">⏰ Дедлайн: ${r.deadline.slice(0,10)}</div>`;
+        }
+
+        return `
+        <div style="background:#fff;border:1px solid #e2e6ed;border-radius:12px;padding:14px 16px;border-left:4px solid ${borderColor};cursor:pointer" onclick="show('safety')">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px;gap:8px">
+            <div style="min-width:0">
+              <div style="font-size:13px;font-weight:700;color:#1e293b;line-height:1.3">${escapeHtml(r.location||'—')}</div>
+              <div style="font-size:11px;color:#94a3b8;margin-top:2px">${escapeHtml(r.risk_type||'—')} · ${r.report_date ? r.report_date.slice(0,10) : '—'}</div>
+            </div>
+            <span style="display:inline-block;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:700;background:${lvBg};color:${lvColor};white-space:nowrap;flex-shrink:0">${r.risk_level||'—'}</span>
+          </div>
+          ${r.risk_description ? `<div style="font-size:12px;color:#475569;margin-bottom:8px;line-height:1.4">${escapeHtml(r.risk_description).slice(0,90)}${(r.risk_description||'').length>90?'…':''}</div>` : ''}
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px">
+            <span style="display:inline-block;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:700;background:${wfBg};color:${wfColor}">${wf}</span>
+            ${r.priority ? `<span style="font-size:10px;font-weight:700;color:#7c3aed;background:#f5f3ff;padding:2px 8px;border-radius:20px">🎯 ${escapeHtml(r.priority)}</span>` : ''}
+          </div>
+          ${cdHtml}
+        </div>`;
+      }).join('')}
+    </div>
+  </div>` : ''}
+
+  `;
+
+  // Clock + calendar bar
+  if (state.clockTimer)   clearInterval(state.clockTimer);
+  if (state.weatherTimer) clearInterval(state.weatherTimer);
   updateClock();
-  state.clockTimer = setInterval(updateClock, 1000);
+  updateWcBar();
+  state.clockTimer = setInterval(() => { updateClock(); updateWcBar(); }, 1000);
+  // Weather: fetch now, refresh every 15 min
+  fetchWeather().then(renderWeather);
+  state.weatherTimer = setInterval(() => fetchWeather().then(renderWeather), 15 * 60 * 1000);
+  // Org info
+  renderOrgInfo();
 }
 
 function updateClock() {
@@ -369,3 +749,109 @@ function updateClock() {
     hour:'2-digit', minute:'2-digit', second:'2-digit'
   });
 }
+
+async function renderOrgInfo() {
+  const el = document.getElementById('wcOrg');
+  if (!el) return;
+  let info = {};
+  try { info = await api('/api/org-settings'); } catch(e) {}
+  const canEdit = ["director","hr"].includes(state.me?.role);
+  const notice = (info.notice || "").trim();
+  el.innerHTML = `
+    <div class="wc-label" style="display:flex;align-items:center;justify-content:space-between">
+      <span>🏛 БАЙГУУЛЛЛАГЫН МЭДЭЭЛЭЛ</span>
+      ${canEdit ? `<button onclick="openOrgEdit()" style="border:none;background:none;cursor:pointer;font-size:11px;color:#2563eb;padding:0;font-weight:600">— Засах</button>` : ""}
+    </div>
+    <div class="wc-main" style="font-size:14px">${info.org_name || "—"}</div>
+    ${notice ? `
+    <div style="overflow:hidden;white-space:nowrap;margin-top:3px">
+      <span style="display:inline-block;animation:orgNoticeScroll 18s linear infinite;font-size:11px;color:#2563eb;font-weight:500">
+        📢 ${notice}
+      </span>
+    </div>
+    <style>
+      @keyframes orgNoticeScroll {
+        0%   { transform: translateX(100%); }
+        100% { transform: translateX(-100%); }
+      }
+    </style>` : `
+    <div class="wc-sub">
+      ${info.director ? `👤 ${info.director}` : ""}
+      ${info.director && info.phone ? " &nbsp;·&nbsp; " : ""}
+      ${info.phone ? `📞 ${info.phone}` : ""}
+      ${!info.director && !info.phone ? "Мэдээлэл бүртгэгдээгүй" : ""}
+    </div>`}`;
+}
+
+function openOrgEdit() {
+  api('/api/org-settings').then(info => {
+    const existing = document.getElementById('orgEditModal');
+    if (existing) existing.remove();
+    document.body.insertAdjacentHTML('beforeend', `
+    <div id="orgEditModal" style="position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:2000;display:flex;align-items:center;justify-content:center">
+      <div style="background:#fff;border-radius:16px;padding:28px 32px;width:480px;box-shadow:0 20px 60px rgba(0,0,0,.25)">
+        <div style="font-weight:800;font-size:16px;margin-bottom:20px">🏛 Байгуулллагын мэдээлэл засах</div>
+        <div style="display:flex;flex-direction:column;gap:12px">
+          <div>
+            <div style="font-size:11px;font-weight:600;color:#64748b;margin-bottom:4px">БАЙГУУЛЛЛАГЫН НЭР</div>
+            <input class="input" id="oe_name" value="${info.org_name||""}" placeholder="Чойбалсан хөгжил ОНӨҮГ">
+          </div>
+          <div>
+            <div style="font-size:11px;font-weight:600;color:#64748b;margin-bottom:4px">ЗАХИРАЛ</div>
+            <input class="input" id="oe_dir" value="${info.director||""}" placeholder="ОД. Батсүх">
+          </div>
+          <div>
+            <div style="font-size:11px;font-weight:600;color:#64748b;margin-bottom:4px">ХАЯГ</div>
+            <input class="input" id="oe_addr" value="${info.address||""}" placeholder="Чойбалсан хот, Дорнод аймаг">
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+            <div>
+              <div style="font-size:11px;font-weight:600;color:#64748b;margin-bottom:4px">УТАС</div>
+              <input class="input" id="oe_phone" value="${info.phone||""}" placeholder="+976 ...">
+            </div>
+            <div>
+              <div style="font-size:11px;font-weight:600;color:#64748b;margin-bottom:4px">И-МЭЙЛ</div>
+              <input class="input" id="oe_email" value="${info.email||""}" placeholder="info@...">
+            </div>
+          </div>
+          <div>
+            <div style="font-size:11px;font-weight:600;color:#64748b;margin-bottom:4px">МУА РЕГИСТР</div>
+            <input class="input" id="oe_reg" value="${info.register||""}" placeholder="1234567">
+          </div>
+          <div>
+            <div style="font-size:11px;font-weight:600;color:#64748b;margin-bottom:4px">
+              📢 МЭДЭГДЭЛ / ЗАРЛАЛ <span style="font-weight:400;color:#94a3b8">(dashboard дээр гүйнэ)</span>
+            </div>
+            <textarea class="input" id="oe_notice" rows="2" placeholder="Өнөөдөр салхи ихтэй өдөр байна, хурал 14:00-д болно...">${info.notice||""}</textarea>
+            <div style="font-size:10px;color:#94a3b8;margin-top:3px">Хоосон үлдээвэл захирал, утас харагдана</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:20px;justify-content:flex-end">
+          <button class="btn secondary" onclick="document.getElementById('orgEditModal').remove()">Болих</button>
+          <button class="btn" onclick="saveOrgInfo()">Хадгалах</button>
+        </div>
+      </div>
+    </div>`);
+  });
+}
+
+async function saveOrgInfo() {
+  const body = {
+    org_name: document.getElementById('oe_name')?.value.trim(),
+    director: document.getElementById('oe_dir')?.value.trim(),
+    address:  document.getElementById('oe_addr')?.value.trim(),
+    phone:    document.getElementById('oe_phone')?.value.trim(),
+    email:    document.getElementById('oe_email')?.value.trim(),
+    register: document.getElementById('oe_reg')?.value.trim(),
+    notice:   document.getElementById('oe_notice')?.value.trim(),
+  };
+  try {
+    await api('/api/org-settings', { method:'PUT', body: JSON.stringify(body) });
+    document.getElementById('orgEditModal')?.remove();
+    renderOrgInfo();
+  } catch(e) {
+    alert(e.message || 'Алдаа гарлаа');
+  }
+}
+
+Object.assign(window, { dashboard, openOrgEdit, saveOrgInfo });

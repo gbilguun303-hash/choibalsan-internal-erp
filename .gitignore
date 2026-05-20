@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Runtime database (generated)
+data/app.db
+data/app.db-shm
+data/app.db-wal
+
+# Uploaded files (runtime)
+uploads/
+
+# Environment / secrets
+.env
+
+# Imported data files
+data/*.xlsx
+data/*.csv
+
+# IDE / tooling
+.claude/
+.vscode/
+*.log
