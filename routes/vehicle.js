@@ -71,6 +71,7 @@ router.get("/vehicle-dashboard", auth, async (_req, res) => {
 
 // ── Daily Inspections ─────────────────────────────────────────
 
+// Deprecated: see docs/deprecated-endpoints.md
 router.get("/vehicles/:id/daily-inspections", auth, async (req, res) => {
   const rows = await all(`
     SELECT d.*, u.full_name inspector_name, v.plate_no

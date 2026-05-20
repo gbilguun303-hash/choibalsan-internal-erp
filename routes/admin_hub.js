@@ -276,6 +276,7 @@ router.delete("/org-contracts/:id", auth, requirePermission("hr_write"), async (
   res.json({ ok: true });
 });
 
+// Deprecated: see docs/deprecated-endpoints.md
 router.post("/org-contracts/:id/scan", auth, requirePermission("hr_write"), upload.single("scan"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "Файл олдсонгүй" });
   const url = "/uploads/" + req.file.filename;

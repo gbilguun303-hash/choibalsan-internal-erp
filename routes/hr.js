@@ -319,11 +319,13 @@ router.delete("/employee-awards/:id", auth, requirePermission("hr_write"), async
 
 // ── Employee Files ───────────────────────────────────────────
 
+// Deprecated: see docs/deprecated-endpoints.md
 router.get("/employee-files/:userId", auth, canAccessOwn("userId"), async (req, res) => {
   const tid = Number(req.params.userId);
   res.json(await all("SELECT * FROM employee_files WHERE user_id=? ORDER BY id DESC", [tid]));
 });
 
+// Deprecated: see docs/deprecated-endpoints.md
 router.post("/employee-files/:userId", auth, requirePermission("hr_write"), upload.single("file"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "Файл байхгүй" });
   const relative = "/uploads/" + req.file.filename;
@@ -335,6 +337,7 @@ router.post("/employee-files/:userId", auth, requirePermission("hr_write"), uplo
   res.json({ id: r.id, file_path: relative });
 });
 
+// Deprecated: see docs/deprecated-endpoints.md
 router.delete("/employee-files/:id", auth, requirePermission("hr_write"), async (req, res) => {
   const f = await get("SELECT * FROM employee_files WHERE id=?", [req.params.id]);
   if (f) {
