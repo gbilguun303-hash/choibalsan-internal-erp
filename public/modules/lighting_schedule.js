@@ -560,7 +560,7 @@ export async function sl_light_sched() {
   _lsCat = ALL_CATS;
   _lsMonth = parseDateStr(_lsDate).month;
 
-  const canEdit = ["director","chief_engineer","accountant","electric"].includes(state.me.role);
+  const canEdit = ["director","chief_engineer","accountant","engineer","electric"].includes(state.me.role);
   const embedTargetId = window._lightingScheduleEmbedTarget || "";
   const embedTarget = embedTargetId ? document.getElementById(embedTargetId) : null;
   if (embedTargetId && !embedTarget) window._lightingScheduleEmbedTarget = "";
@@ -606,7 +606,7 @@ async function lsRender() {
   _lsYear = selected.year;
   _lsCat  = ALL_CATS;
   _lsMonth = selected.month;
-  const canEdit = ["director","chief_engineer","accountant","electric"].includes(state.me.role);
+  const canEdit = ["director","chief_engineer","accountant","engineer","electric"].includes(state.me.role);
 
   let allLogs = [];
   try {

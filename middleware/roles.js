@@ -49,7 +49,7 @@ const PERMISSIONS = {
 
   // ── Assets / Objects ──────────────────────────────────────────
   // Объектийн бүртгэл: нэмэх, засах, устгах
-  assets_write:       ["director", "chief_engineer", "storekeeper", "engineer", "camera_engineer"],
+  assets_write:       ["director", "chief_engineer", "storekeeper", "engineer", "electric", "camera_engineer"],
   assets_delete:      ["director", "chief_engineer"],
 
   // ── Streetlights / Electricity billing ───────────────────────
@@ -87,7 +87,7 @@ const PERMISSIONS = {
 
   // ── Operations / Work logs ────────────────────────────────────
   // Ажлын бүртгэл үүсгэх, засах, гүйцэтгэл, зураг
-  operations_write:   ["director", "chief_engineer", "engineer", "camera_engineer"],
+  operations_write:   ["director", "chief_engineer", "engineer", "camera_engineer", "electric"],
   // Ажил болон гүйцэтгэл устгах
   operations_delete:  ["director", "chief_engineer"],
   // Ажил дуусгавар батлах / буцаах
@@ -95,6 +95,7 @@ const PERMISSIONS = {
 
   // ── Vehicles ──────────────────────────────────────────────────
   vehicle_write:      ["director", "chief_engineer", "safety"],
+  vehicle_repair:     ["director", "chief_engineer"],
 
   // ── Smart import (Excel/PDF) ──────────────────────────────────
   smart_import:       ["director", "accountant", "storekeeper", "chief_engineer"],

@@ -3,7 +3,11 @@ const jwt = require("jsonwebtoken");
 const multer = require("multer");
 const path = require("path");
 
-const JWT_SECRET = process.env.JWT_SECRET || "CHANGE_THIS_SECRET_2026_CHOIBALSAN";
+function jwtSecret() {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) throw new Error("JWT_SECRET is required.");
+  return secret;
+}
 const DB_FILE = path.join(__dirname, "data", "app.db");
 const UPLOAD_DIR = path.join(__dirname, "uploads");
 
@@ -30,11 +34,18 @@ function get(sql, params = []) {
   });
 }
 
-function auth(req, res, next) {
+async function auth(req, res, next) {
   const token = (req.headers.authorization || "").replace("Bearer ", "");
   if (!token) return res.status(401).json({ error: "Нэвтрэх шаардлагатай" });
   try {
-    req.user = jwt.verify(token, JWT_SECRET);
+    const payload = jwt.verify(token, jwtSecret());
+    const user = await get(
+      "SELECT id, username, full_name, role, permissions, active, can_login FROM users WHERE id=? AND active=1",
+      [payload.id]
+    );
+    if (!user) return res.status(401).json({ error: "Хэрэглэгч олдсонгүй" });
+    if (!user.can_login) return res.status(401).json({ error: "Нэвтрэх эрх хасагдсан" });
+    req.user = { ...payload, role: user.role, permissions: user.permissions || null };
     next();
   } catch {
     res.status(401).json({ error: "Token буруу байна" });
@@ -53,6 +64,8 @@ const ALLOWED_MIME = new Set([
   "application/pdf",
   "application/msword",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.ms-powerpoint",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
   "application/vnd.ms-excel",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   "text/plain","text/csv",

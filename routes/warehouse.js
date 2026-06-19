@@ -4,6 +4,15 @@ const { requirePermission } = require("../middleware/roles");
 
 const router = express.Router();
 
+// ── Warehouse summary endpoint (alias) ───────────────────────
+router.get("/warehouse", auth, async (_, res) => {
+  try {
+    res.json(await all("SELECT * FROM warehouse_items ORDER BY item_name"));
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── Warehouse items (materials) ──────────────────────────────
 
 router.post("/materials", auth, async (req, res) => {

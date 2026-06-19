@@ -30,6 +30,10 @@ function statusBadge(status, isActive) {
 
 // ── Main entry ────────────────────────────────────────────────
 async function lora_monitor() {
+  if (typeof window.iot_monitor === "function") {
+    await window.iot_monitor();
+    return;
+  }
   const el = document.getElementById("main");
   el.innerHTML = `
     <div style="padding:24px;max-width:1200px">

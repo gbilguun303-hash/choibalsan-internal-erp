@@ -8,20 +8,55 @@ const { requireRole, requirePermission, canAccessOwn } = require("../middleware/
 
 const router = express.Router();
 
+function digitsOnly(value) {
+  return String(value || "").replace(/\D/g, "");
+}
+
 // ── Auth-related profile ─────────────────────────────────────
 
 router.get("/me", auth, async (req, res) => {
   const user = await get(
-    "SELECT id,username,full_name,role,position,department,email FROM users WHERE id=?",
+    "SELECT id,username,full_name,role,position,department,email,avatar_url FROM users WHERE id=?",
     [req.user.id]);
   res.json(user);
+});
+
+router.post("/me/avatar", auth, upload.single("avatar"), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "Зураг сонгоно уу" });
+  if (!String(req.file.mimetype || "").startsWith("image/")) {
+    try { fs.unlinkSync(req.file.path); } catch {}
+    return res.status(400).json({ error: "Зөвхөн зураг файл оруулна уу" });
+  }
+
+  const current = await get("SELECT avatar_url FROM users WHERE id=?", [req.user.id]);
+  const avatarUrl = `/uploads/${req.file.filename}`;
+  await run("UPDATE users SET avatar_url=? WHERE id=?", [avatarUrl, req.user.id]);
+
+  const oldUrl = current?.avatar_url || "";
+  if (oldUrl.startsWith("/uploads/") && oldUrl !== avatarUrl) {
+    const oldPath = path.resolve(UPLOAD_DIR, path.basename(oldUrl));
+    if (oldPath.startsWith(path.resolve(UPLOAD_DIR) + path.sep)) {
+      try { fs.unlinkSync(oldPath); } catch {}
+    }
+  }
+  await audit(req.user.id, "UPDATE_AVATAR", "users", req.user.id, avatarUrl);
+  res.json({ avatar_url: avatarUrl });
+});
+
+router.get("/my-salary", auth, async (req, res) => {
+  const u = await get(
+    `SELECT salary, skill_allowance_rate, skill_allowance,
+            tenure_years, tenure_allowance_rate, tenure_allowance
+     FROM users WHERE id=? AND active=1`,
+    [req.user.id]);
+  res.json(u || null);
 });
 
 // ── Users ────────────────────────────────────────────────────
 
 router.get("/users", auth, async (_, res) => {
   res.json(await all(
-    "SELECT id,username,full_name,role,position,department,phone,email,active,can_login,permissions FROM users WHERE active=1 ORDER BY id"));
+    "SELECT id,username,full_name,role,position,department,phone,email,register_no,address,avatar_url,active,can_login,permissions FROM users WHERE active=1 ORDER BY id"));
 });
 
 // Full user list for HR module (salary masked for non-hr/director)
@@ -30,8 +65,9 @@ router.get("/users-full", auth, async (req, res) => {
   const rows = await all(
     `SELECT id,username,full_name,role,position,department,phone,email,
             register_no,address,hire_date,contract_type,contract_end,
-            status_hr,job_category,education,gender,birthdate,nationality,
+            status_hr,job_category,education,gender,work_condition,birthdate,nationality,
             emergency_contact,active,can_login,created_at,contract_scan_url,
+            haot_exempt,
             ${canSeeSalary ? "salary,skill_allowance_rate,skill_allowance,tenure_years,tenure_allowance_rate,tenure_allowance,meal_allowance" : "NULL AS salary,NULL AS skill_allowance_rate,NULL AS skill_allowance,NULL AS tenure_years,NULL AS tenure_allowance_rate,NULL AS tenure_allowance,NULL AS meal_allowance"}
      FROM users WHERE active=1 ORDER BY full_name`);
   res.json(rows);
@@ -84,14 +120,14 @@ router.put("/users/:id/hr", auth, requirePermission("hr_write"), async (req, res
   await run(`UPDATE users SET
     full_name=?,position=?,department=?,phone=?,email=?,address=?,
     register_no=?,hire_date=?,contract_type=?,contract_end=?,
-    status_hr=?,job_category=?,education=?,gender=?,birthdate=?,
+    status_hr=?,job_category=?,education=?,gender=?,work_condition=?,birthdate=?,
     nationality=?,emergency_contact=?,role=?,active=?
     ${canEditSalary ? ",salary=?,skill_allowance_rate=?,skill_allowance=?,tenure_years=?,tenure_allowance_rate=?,tenure_allowance=?,meal_allowance=?" : ""}
     WHERE id=?`,
     [b.full_name.trim(),b.position||"",b.department||"",b.phone||"",b.email||null,
      b.address||"",b.register_no||"",b.hire_date||null,b.contract_type||"Байнгын",
      b.contract_end||null,b.status_hr||"Идэвхтэй",b.job_category||"Захиргааны ажилтан",
-     b.education||"",b.gender||"",b.birthdate||null,b.nationality||"Монгол",
+     b.education||"",b.gender||"",b.work_condition||"",b.birthdate||null,b.nationality||"Монгол",
      b.emergency_contact||"",b.role||"engineer",b.active!==false?1:0,
      ...(canEditSalary ? [salary||0, skillAllowanceRate||0, skillAllowance||0, tenureYears||0, tenureAllowanceRate||0, tenureAllowance||0, mealAllowance||0] : []),
      req.params.id]);
@@ -152,8 +188,10 @@ router.post("/users", auth, requirePermission("hr_write"), async (req, res) => {
   if (!b.full_name || !b.full_name.trim())
     return res.status(400).json({ error: "Овог нэр шаардлагатай" });
 
-  const username = (b.username || ("emp" + Date.now())).trim();
-  const password = b.password || crypto.randomBytes(18).toString("base64url");
+  const phoneDigits = digitsOnly(b.phone);
+  const registerDigits = digitsOnly(b.register_no);
+  const username = (b.username || phoneDigits || ("emp" + Date.now())).trim();
+  const password = b.password || registerDigits || crypto.randomBytes(18).toString("base64url");
 
   if (b.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(b.email))
     return res.status(400).json({ error: "Имэйл хаяг буруу форматтай байна" });
@@ -183,12 +221,17 @@ router.post("/users", auth, requirePermission("hr_write"), async (req, res) => {
   try {
     r = await run(`
       INSERT INTO users(username,password_hash,full_name,role,position,
-        register_no,address,phone,department,email,salary,skill_allowance_rate,skill_allowance,tenure_years,tenure_allowance_rate,tenure_allowance,meal_allowance,active,can_login)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)`,
+        register_no,address,phone,department,email,gender,education,work_condition,birthdate,nationality,emergency_contact,
+        hire_date,contract_type,contract_end,status_hr,
+        salary,skill_allowance_rate,skill_allowance,tenure_years,tenure_allowance_rate,tenure_allowance,meal_allowance,active,can_login)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)`,
       [username, bcrypt.hashSync(password, 10), b.full_name.trim(),
        b.role || "engineer", b.position || "",
         b.register_no || "", b.address || "", b.phone || "", b.department || "",
-        b.email || null, Number(b.salary || 0), Math.floor(Number(b.skill_allowance_rate || 0)), Number(b.skill_allowance || 0),
+        b.email || null, b.gender || "", b.education || "", b.work_condition || "", b.birthdate || null,
+        b.nationality || "Монгол", b.emergency_contact || "", b.hire_date || null, b.contract_type || "Байнгын",
+        b.contract_end || null, b.status_hr || "Идэвхтэй",
+        Number(b.salary || 0), Math.floor(Number(b.skill_allowance_rate || 0)), Number(b.skill_allowance || 0),
         Math.floor(Number(b.tenure_years || 0)), Number(b.tenure_allowance_rate || 0), Number(b.tenure_allowance || 0), Number(b.meal_allowance || 0),
         b.can_login ? 1 : 0]);
   } catch (e) {
@@ -203,10 +246,16 @@ router.post("/users", auth, requirePermission("hr_write"), async (req, res) => {
 router.put("/users/:id", auth, requirePermission("hr_write"), async (req, res) => {
 
   const b = req.body;
+  const username = (b.username || digitsOnly(b.phone) || "").trim();
+  if (username) {
+    const existing = await get("SELECT id FROM users WHERE username=? AND id<>?", [username, req.params.id]);
+    if (existing)
+      return res.status(409).json({ error: `"${username}" нэвтрэх нэр аль хэдийн бүртгэлтэй байна` });
+  }
   await run(`
-    UPDATE users SET full_name=?,role=?,position=?,register_no=?,
+    UPDATE users SET ${username ? "username=?," : ""} full_name=?,role=?,position=?,register_no=?,
       address=?,phone=?,department=?,email=?,active=?,can_login=?,permissions=? WHERE id=?`,
-    [b.full_name, b.role || "engineer", b.position || "",
+    [...(username ? [username] : []), b.full_name, b.role || "engineer", b.position || "",
      b.register_no || "", b.address || "", b.phone || "",
      b.department || "", b.email || null, b.active ? 1 : 0,
       b.can_login ? 1 : 0, b.permissions || null, req.params.id]);
@@ -262,7 +311,7 @@ router.delete("/users/:id/permanent", auth, requireRole("director"), async (req,
 
 // ── HR records ───────────────────────────────────────────────
 
-router.post("/hr-records", auth, async (req, res) => {
+router.post("/hr-records", auth, requirePermission("hr_write"), async (req, res) => {
   const b = req.body;
   if (!b.user_id)     return res.status(400).json({ error: "Ажилтан сонгоогүй байна" });
   if (!b.record_type) return res.status(400).json({ error: "Бүртгэлийн төрөл шаардлагатай" });
@@ -274,20 +323,66 @@ router.post("/hr-records", auth, async (req, res) => {
   if (b.end_date && b.end_date < b.start_date)
     return res.status(400).json({ error: "Дуусах огноо эхлэх огнооноос өмнө байж болохгүй" });
 
+  const hasHourData = ["work_hours", "leave_hours", "overtime_hours"]
+    .some(key => b[key] !== undefined && b[key] !== null && b[key] !== "");
+  const workHours = hasHourData ? Number(b.work_hours || 0) : null;
+  const leaveHours = hasHourData ? Number(b.leave_hours || 0) : null;
+  const overtimeHours = hasHourData ? Number(b.overtime_hours || 0) : null;
+  if (hasHourData && [workHours, leaveHours, overtimeHours].some(v => !Number.isFinite(v) || v < 0 || v > 24))
+    return res.status(400).json({ error: "Цагийн утга 0-24 хооронд байна" });
+  if (hasHourData && workHours + leaveHours > 8)
+    return res.status(400).json({ error: "Ажилласан болон чөлөө/тасалсан цагийн нийлбэр 8-аас их байж болохгүй" });
+  const recordType = hasHourData && leaveHours > 0 && ["Ажилласан", "Хоцорсон", "Илүү цаг"].includes(b.record_type)
+    ? "Чөлөө"
+    : b.record_type;
+
+  const endDate = b.end_date || b.start_date;
+  if (hasHourData && endDate === b.start_date) {
+    const existing = await get(
+      `SELECT id FROM hr_records
+       WHERE user_id=? AND start_date=? AND COALESCE(end_date,start_date)=?
+       ORDER BY id DESC LIMIT 1`,
+      [b.user_id, b.start_date, b.start_date]);
+    if (existing) {
+      await run(
+        `UPDATE hr_records
+         SET record_type=?,end_date=?,work_hours=?,leave_hours=?,overtime_hours=?,note=?,created_by=?
+         WHERE id=?`,
+        [recordType, endDate, workHours, leaveHours, overtimeHours, b.note || "", req.user.id, existing.id]);
+      await audit(req.user.id, "UPDATE", "hr_records", existing.id, `${recordType} цагийн бүртгэл`);
+      return res.json({ id: existing.id, updated: true });
+    }
+  }
+
   const r = await run(
-    `INSERT INTO hr_records(user_id,record_type,start_date,end_date,note,created_by) VALUES(?,?,?,?,?,?)`,
-    [b.user_id, b.record_type, b.start_date, b.end_date || null, b.note || "", req.user.id]);
-  await audit(req.user.id, "CREATE", "hr_records", r.id, b.record_type);
+    `INSERT INTO hr_records(
+       user_id,record_type,start_date,end_date,work_hours,leave_hours,overtime_hours,note,created_by
+     ) VALUES(?,?,?,?,?,?,?,?,?)`,
+    [b.user_id, recordType, b.start_date, b.end_date || null,
+     workHours, leaveHours, overtimeHours, b.note || "", req.user.id]);
+  await audit(req.user.id, "CREATE", "hr_records", r.id, recordType);
   res.json({ id: r.id });
 });
 
-router.get("/hr-records", auth, async (_, res) => {
-  res.json(await all(
-    `SELECT h.*, u.full_name employee_name, c.full_name created_name
-     FROM hr_records h
-     LEFT JOIN users u ON u.id=h.user_id
-     LEFT JOIN users c ON c.id=h.created_by
-     ORDER BY start_date DESC, id DESC`));
+router.get("/hr-records", auth, async (req, res) => {
+  const canSeeAll = ["director", "hr", "chief_engineer"].includes(req.user.role);
+  if (canSeeAll) {
+    res.json(await all(
+      `SELECT h.*, u.full_name employee_name, c.full_name created_name
+       FROM hr_records h
+       LEFT JOIN users u ON u.id=h.user_id
+       LEFT JOIN users c ON c.id=h.created_by
+       ORDER BY start_date DESC, id DESC`));
+  } else {
+    res.json(await all(
+      `SELECT h.*, u.full_name employee_name, c.full_name created_name
+       FROM hr_records h
+       LEFT JOIN users u ON u.id=h.user_id
+       LEFT JOIN users c ON c.id=h.created_by
+       WHERE h.user_id=?
+       ORDER BY start_date DESC, id DESC`,
+      [req.user.id]));
+  }
 });
 
 router.delete("/hr-records/:id", auth, requirePermission("hr_write"), async (req, res) => {

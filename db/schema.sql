@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS users (
   address       TEXT,
   phone         TEXT,
   department    TEXT,
+  avatar_url    TEXT,
   active        INTEGER DEFAULT 1,
   created_at    TEXT DEFAULT CURRENT_TIMESTAMP
 );
@@ -35,6 +36,7 @@ CREATE TABLE IF NOT EXISTS asset_events (
   cost_amount   REAL DEFAULT 0,
   material_note TEXT,
   asset_id      INTEGER,
+  asset_ids     TEXT DEFAULT '[]',
   asset_code    TEXT,
   created_at    TEXT DEFAULT CURRENT_TIMESTAMP,
   updated_at    TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -125,9 +127,23 @@ CREATE TABLE IF NOT EXISTS hr_records (
   record_type TEXT NOT NULL,
   start_date  TEXT NOT NULL,
   end_date    TEXT,
+  work_hours  REAL,
+  leave_hours REAL,
+  overtime_hours REAL,
   note        TEXT,
   created_by  INTEGER NOT NULL,
   created_at  TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS chat_message_reactions (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  message_id INTEGER NOT NULL,
+  user_id    INTEGER NOT NULL,
+  emoji      TEXT NOT NULL,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(message_id, user_id),
+  FOREIGN KEY(message_id) REFERENCES chat_messages(id),
+  FOREIGN KEY(user_id) REFERENCES users(id)
 );
 
 -- Renamed from "documents" (was: incoming/outgoing correspondence)

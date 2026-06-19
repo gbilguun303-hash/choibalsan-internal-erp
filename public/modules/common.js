@@ -28,21 +28,38 @@ export const menuNames = {
   hr:"👥 Хүний нөөц",
   docs:"📄 Бичиг / гомдол",
   safety:"🦺 ХАБЭА",
-  plans:"📈 Төлөвлөгөө",
+  plans:"📈 Ирээдүйн төсөл",
   reports:"📑 Тайлан",
   audit:"🛡 Audit log"
 };
 
 export async function api(path, opt = {}) {
-  const res = await fetch(API + path, {
-    ...opt,
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": "Bearer " + state.token,
-      ...(opt.headers || {})
-    }
-  });
-  if (!res.ok) throw new Error((await res.json()).error || "Алдаа гарлаа");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30000);
+  let res;
+  try {
+    res = await fetch(API + path, {
+      ...opt,
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + state.token,
+        ...(opt.headers || {})
+      }
+    });
+  } catch (e) {
+    clearTimeout(timer);
+    if (e.name === "AbortError") throw new Error("Сервер хариу өгсөнгүй (timeout)");
+    throw new Error("Сүлжээний алдаа гарлаа");
+  }
+  clearTimeout(timer);
+  if (!res.ok) {
+    const ct = res.headers.get("content-type") || "";
+    const msg = ct.includes("json")
+      ? ((await res.json().catch(() => ({}))).error || "Алдаа гарлаа")
+      : "Серверийн алдаа гарлаа";
+    throw new Error(msg);
+  }
   return res.json();
 }
 

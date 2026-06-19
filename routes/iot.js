@@ -1,0 +1,861 @@
+const express = require("express");
+const { run, all, get, auth } = require("../db");
+const { requirePermission } = require("../middleware/roles");
+
+const router = express.Router();
+
+function normalizeDevEui(value) {
+  return String(value || "").trim().toUpperCase();
+}
+
+function numberOrNull(value) {
+  if (value === "" || value === null || value === undefined) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function stateOrNull(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function firstValue(obj, keys) {
+  for (const key of keys) {
+    if (obj && obj[key] !== undefined && obj[key] !== null && obj[key] !== "") return obj[key];
+  }
+  return null;
+}
+
+function numberFirst(obj, keys) {
+  return numberOrNull(firstValue(obj, keys));
+}
+
+function decodedObject(body) {
+  return body.object || body.decodedData || body.objectJSON || {};
+}
+
+function jsonText(value) {
+  try {
+    return JSON.stringify(value ?? {});
+  } catch (_) {
+    return "{}";
+  }
+}
+
+function mnLocalParts(date = new Date()) {
+  const local = new Date(date.getTime() + 8 * 60 * 60 * 1000);
+  return {
+    year: local.getUTCFullYear(),
+    month: local.getUTCMonth(),
+    date: local.getUTCDate(),
+    hour: local.getUTCHours(),
+  };
+}
+
+function mnLocalUtc(year, month, day, hour = 0, minute = 0, second = 0) {
+  return new Date(Date.UTC(year, month, day, hour - 8, minute, second));
+}
+
+function iotReportRange(period = "night") {
+  const now = new Date();
+  const p = String(period || "night").toLowerCase();
+  const local = mnLocalParts(now);
+  if (p === "today") {
+    const from = mnLocalUtc(local.year, local.month, local.date, 0);
+    const to = mnLocalUtc(local.year, local.month, local.date + 1, 0);
+    return { period: p, label: "Өнөөдөр", from, to };
+  }
+  if (p === "7d" || p === "week") {
+    return { period: "7d", label: "Сүүлийн 7 хоног", from: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000), to: now };
+  }
+  if (p === "month") {
+    const from = mnLocalUtc(local.year, local.month, 1, 0);
+    const to = mnLocalUtc(local.year, local.month + 1, 1, 0);
+    return { period: p, label: "Энэ сар", from, to };
+  }
+  if (p === "year") {
+    const from = mnLocalUtc(local.year, 0, 1, 0);
+    const to = mnLocalUtc(local.year + 1, 0, 1, 0);
+    return { period: p, label: "Энэ жил", from, to };
+  }
+  const from = mnLocalUtc(local.year, local.month, local.date - 1, 20);
+  const to = mnLocalUtc(local.year, local.month, local.date, 6);
+  return { period: "night", label: "Өнгөрсөн шөнө", from, to };
+}
+
+function isReadingOn(row) {
+  return Number(row?.power || 0) > 0.01 || Number(row?.current || 0) > 0.02 || String(row?.do_state || "").trim() === "0";
+}
+
+function round(value, digits = 2) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return Number(n.toFixed(digits));
+}
+
+function localDateKeyFromIso(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const local = new Date(d.getTime() + 8 * 60 * 60 * 1000);
+  return `${local.getUTCFullYear()}-${String(local.getUTCMonth() + 1).padStart(2, "0")}-${String(local.getUTCDate()).padStart(2, "0")}`;
+}
+
+function localMinutesFromIso(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  const local = new Date(d.getTime() + 8 * 60 * 60 * 1000);
+  return local.getUTCHours() * 60 + local.getUTCMinutes();
+}
+
+function minutesFromTime(value) {
+  const m = String(value || "").match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return null;
+  return Number(m[1]) * 60 + Number(m[2]);
+}
+
+function scheduledOnAt(log, iso) {
+  if (!log) return null;
+  if (Number(log.is_always_off || 0)) return false;
+  const on = minutesFromTime(log.on_time);
+  const off = minutesFromTime(log.off_time);
+  const cur = localMinutesFromIso(iso);
+  if (on === null || off === null || cur === null) return null;
+  if (off <= on) return cur >= on || cur < off;
+  return cur >= on && cur < off;
+}
+
+function activeScheduleFor(logs, category, dateKey) {
+  return logs.find(l => l.category === category && String(l.valid_from || "") <= dateKey) || null;
+}
+
+function boolEnv(value, defaultValue = false) {
+  if (value === undefined || value === null || value === "") return defaultValue;
+  return ["1", "true", "yes", "on"].includes(String(value).toLowerCase());
+}
+
+function normalizeHex(value) {
+  return String(value || "").replace(/\s+/g, "").toLowerCase();
+}
+
+const ADW300_DO1_ON_HEX = "4D6F646275733A30303130303143323030303130323030303136413232";
+const ADW300_DO1_OFF_HEX = "4D6F646275733A30303130303143323030303130323030303041424532";
+
+const IOT_NODE_CONFIG = {
+  "00956906000AA9F1": { category: "Авто замын гэрэл", lampCount: 20, wattageW: 100 },
+  "00956906000AE4EA": { category: "Гэр хорооллын гэрэл", lampCount: 20, wattageW: 100 },
+};
+
+function detectDeviceModel({ devEui, deviceName }) {
+  const eui = normalizeDevEui(devEui);
+  const name = String(deviceName || "").toLowerCase();
+  if (eui === "00956906000AE4EA" || /\b(node|nod)\s*2\b/.test(name) || name.includes("dornod nod 2")) {
+    return "ADW300";
+  }
+  if (eui === "00956906000AA9F1" || /\b(node|nod)\s*1\b/.test(name) || name.includes("dornod nod 1")) {
+    return "ADW310";
+  }
+  return "ADW310";
+}
+
+function downlinkPayloadHex(action, model = "ADW310") {
+  if (model === "ADW300") {
+    if (action === "ON") return normalizeHex(ADW300_DO1_ON_HEX);
+    if (action === "OFF") return normalizeHex(ADW300_DO1_OFF_HEX);
+  }
+  if (action === "ON") return normalizeHex(process.env.IOT_DOWNLINK_ON_HEX);
+  if (action === "OFF") return normalizeHex(process.env.IOT_DOWNLINK_OFF_HEX);
+  return "";
+}
+
+function validateDownlinkRequest({ devEui, action, model }) {
+  const apiUrl = String(process.env.CHIRPSTACK_API_URL || "").replace(/\/+$/, "");
+  const token = process.env.CHIRPSTACK_API_TOKEN;
+  const payloadHex = downlinkPayloadHex(action, model);
+  const fPort = Number(process.env.IOT_DOWNLINK_FPORT);
+  const confirmed = boolEnv(process.env.IOT_DOWNLINK_CONFIRMED, true);
+
+  if (!devEui) throw new Error("devEui is required");
+  if (!["ON", "OFF"].includes(action)) throw new Error("action must be ON or OFF");
+  if (!["ADW300", "ADW310"].includes(model)) throw new Error("Unsupported IoT device model");
+  if (!apiUrl) throw new Error("CHIRPSTACK_API_URL is not configured");
+  if (!token) throw new Error("CHIRPSTACK_API_TOKEN is not configured");
+  if (!payloadHex) throw new Error(`${model} ${action} payload is not configured`);
+  if (payloadHex.length % 2 !== 0) throw new Error(`IOT_DOWNLINK_${action}_HEX must have even length`);
+  if (!/^[0-9a-f]+$/i.test(payloadHex)) throw new Error(`IOT_DOWNLINK_${action}_HEX must contain only hex characters`);
+  if (!Number.isInteger(fPort) || fPort < 1 || fPort > 223) {
+    throw new Error("IOT_DOWNLINK_FPORT must be an integer between 1 and 223");
+  }
+
+  return { apiUrl, token, payloadHex, fPort, confirmed, model };
+}
+
+async function enqueueChirpStackDownlink({ devEui, action, model }) {
+  const { apiUrl, token, payloadHex, fPort, confirmed } = validateDownlinkRequest({ devEui, action, model });
+  const data = Buffer.from(payloadHex, "hex").toString("base64");
+  const body = { queueItem: { confirmed, fPort, data } };
+
+  const response = await fetch(`${apiUrl}/api/devices/${encodeURIComponent(devEui)}/queue`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${token}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  const text = await response.text();
+  let parsed = null;
+  try { parsed = text ? JSON.parse(text) : null; } catch (_) {}
+  if (!response.ok) {
+    throw new Error(parsed?.message || parsed?.error || text || `ChirpStack downlink failed (${response.status})`);
+  }
+
+  return {
+    statusCode: response.status,
+    chirpstackQueueResult: parsed || text || {},
+    fPort,
+    confirmed,
+    payloadHex,
+    model,
+  };
+}
+
+function latestDeviceSelect(whereClause = "") {
+  return `
+    WITH latest AS (
+      SELECT r.*
+      FROM iot_meter_readings r
+      JOIN (
+        SELECT dev_eui, MAX(id) AS max_id
+        FROM iot_meter_readings
+        ${whereClause}
+        GROUP BY dev_eui
+      ) x ON x.max_id = r.id
+    ),
+    latest_command AS (
+      SELECT c.*
+      FROM iot_device_commands c
+      JOIN (
+        SELECT dev_eui, MAX(id) AS max_id
+        FROM iot_device_commands
+        WHERE status IN ('queued','txack_received','ack_received','uplink_received')
+        GROUP BY dev_eui
+      ) x ON x.max_id = c.id
+    )
+    SELECT
+      l.id,
+      l.dev_eui AS devEui,
+      l.device_name AS deviceName,
+      l.application_name AS applicationName,
+      CASE
+        WHEN UPPER(l.dev_eui)='00956906000AE4EA' OR LOWER(COALESCE(l.device_name,'')) LIKE '%nod 2%' OR LOWER(COALESCE(l.device_name,'')) LIKE '%node 2%' THEN 'ADW300'
+        ELSE 'ADW310'
+      END AS deviceModel,
+      (SELECT voltage FROM iot_meter_readings m WHERE m.dev_eui=l.dev_eui AND m.voltage IS NOT NULL ORDER BY m.id DESC LIMIT 1) AS voltage,
+      (SELECT current FROM iot_meter_readings m WHERE m.dev_eui=l.dev_eui AND m.current IS NOT NULL ORDER BY m.id DESC LIMIT 1) AS current,
+      (SELECT voltage FROM iot_meter_readings m WHERE m.dev_eui=l.dev_eui AND m.voltage IS NOT NULL ORDER BY m.id DESC LIMIT 1) AS V,
+      (SELECT current FROM iot_meter_readings m WHERE m.dev_eui=l.dev_eui AND m.current IS NOT NULL ORDER BY m.id DESC LIMIT 1) AS A,
+      (SELECT power FROM iot_meter_readings m WHERE m.dev_eui=l.dev_eui AND m.power IS NOT NULL ORDER BY m.id DESC LIMIT 1) AS power,
+      (SELECT energy FROM iot_meter_readings m WHERE m.dev_eui=l.dev_eui AND m.energy IS NOT NULL ORDER BY m.id DESC LIMIT 1) AS energy,
+      (SELECT frequency FROM iot_meter_readings m WHERE m.dev_eui=l.dev_eui AND m.frequency IS NOT NULL ORDER BY m.id DESC LIMIT 1) AS frequency,
+      (SELECT power_factor FROM iot_meter_readings m WHERE m.dev_eui=l.dev_eui AND m.power_factor IS NOT NULL ORDER BY m.id DESC LIMIT 1) AS power_factor,
+      (SELECT ua FROM iot_meter_readings m WHERE m.dev_eui=l.dev_eui AND m.ua IS NOT NULL ORDER BY m.id DESC LIMIT 1) AS Ua,
+      (SELECT ub FROM iot_meter_readings m WHERE m.dev_eui=l.dev_eui AND m.ub IS NOT NULL ORDER BY m.id DESC LIMIT 1) AS Ub,
+      (SELECT uc FROM iot_meter_readings m WHERE m.dev_eui=l.dev_eui AND m.uc IS NOT NULL ORDER BY m.id DESC LIMIT 1) AS Uc,
+      (SELECT ia FROM iot_meter_readings m WHERE m.dev_eui=l.dev_eui AND m.ia IS NOT NULL ORDER BY m.id DESC LIMIT 1) AS Ia,
+      (SELECT ib FROM iot_meter_readings m WHERE m.dev_eui=l.dev_eui AND m.ib IS NOT NULL ORDER BY m.id DESC LIMIT 1) AS Ib,
+      (SELECT ic FROM iot_meter_readings m WHERE m.dev_eui=l.dev_eui AND m.ic IS NOT NULL ORDER BY m.id DESC LIMIT 1) AS Ic,
+      (SELECT total_power FROM iot_meter_readings m WHERE m.dev_eui=l.dev_eui AND m.total_power IS NOT NULL ORDER BY m.id DESC LIMIT 1) AS totalP,
+      (SELECT ep FROM iot_meter_readings m WHERE m.dev_eui=l.dev_eui AND m.ep IS NOT NULL ORDER BY m.id DESC LIMIT 1) AS EP,
+      (SELECT pf FROM iot_meter_readings m WHERE m.dev_eui=l.dev_eui AND m.pf IS NOT NULL ORDER BY m.id DESC LIMIT 1) AS Pf,
+      (SELECT do_state FROM iot_meter_readings m WHERE m.dev_eui=l.dev_eui AND m.do_state IS NOT NULL ORDER BY m.id DESC LIMIT 1) AS DO_State,
+      (SELECT di_state FROM iot_meter_readings m WHERE m.dev_eui=l.dev_eui AND m.di_state IS NOT NULL ORDER BY m.id DESC LIMIT 1) AS DI_State,
+      (SELECT rssi FROM iot_meter_readings m WHERE m.dev_eui=l.dev_eui AND m.rssi IS NOT NULL ORDER BY m.id DESC LIMIT 1) AS rssi,
+      (SELECT snr FROM iot_meter_readings m WHERE m.dev_eui=l.dev_eui AND m.snr IS NOT NULL ORDER BY m.id DESC LIMIT 1) AS snr,
+      (SELECT gateway_id FROM iot_meter_readings m WHERE m.dev_eui=l.dev_eui AND m.gateway_id IS NOT NULL ORDER BY m.id DESC LIMIT 1) AS gatewayId,
+      l.raw_payload AS rawPayload,
+      l.received_at AS last_seen,
+      l.created_at,
+      c.id AS command_id,
+      c.device_model AS command_device_model,
+      c.action AS command_action,
+      c.status AS command_status,
+      c.requested_at AS command_requested_at,
+      c.f_port AS command_f_port,
+      c.payload_hex AS command_payload_hex,
+      CASE
+        WHEN c.id IS NULL THEN NULL
+        WHEN EXISTS (
+          SELECT 1 FROM iot_meter_readings m
+          WHERE m.dev_eui=l.dev_eui
+            AND datetime(m.received_at) >= datetime(c.requested_at)
+            AND (m.power IS NOT NULL OR m.current IS NOT NULL OR m.do_state IS NOT NULL)
+            AND (
+              (c.action='ON' AND (COALESCE(m.power, 0) > 0.01 OR COALESCE(m.current, 0) > 0.02 OR TRIM(COALESCE(m.do_state, ''))='0'))
+              OR
+              (c.action='OFF' AND (COALESCE(m.power, 0) <= 0.01 AND COALESCE(m.current, 0) <= 0.02 OR TRIM(COALESCE(m.do_state, ''))='1'))
+            )
+        ) THEN LOWER(c.action) || '_confirmed'
+        WHEN EXISTS (
+          SELECT 1 FROM iot_meter_readings m
+          WHERE m.dev_eui=l.dev_eui
+            AND datetime(m.received_at) >= datetime(c.requested_at)
+        ) THEN 'uplink_received'
+        WHEN c.status='ack_received' THEN 'ack_received'
+        WHEN c.status='txack_received' THEN 'txack_received'
+        WHEN c.status='queued' THEN 'queued'
+        WHEN (
+          SELECT COUNT(*) FROM iot_meter_readings m
+          WHERE m.dev_eui=l.dev_eui
+            AND datetime(m.received_at) >= datetime(c.requested_at)
+            AND (m.power IS NOT NULL OR m.current IS NOT NULL OR m.do_state IS NOT NULL)
+        ) >= 2 THEN 'sent_not_confirmed'
+        ELSE 'pending_confirmation'
+      END AS command_confirmation_status,
+      (
+        SELECT COUNT(*) FROM iot_meter_readings m
+        WHERE m.dev_eui=l.dev_eui
+          AND datetime(m.received_at) >= datetime(c.requested_at)
+          AND (m.power IS NOT NULL OR m.current IS NOT NULL OR m.do_state IS NOT NULL)
+      ) AS command_uplinks_seen
+    FROM latest l
+    LEFT JOIN latest_command c ON c.dev_eui=l.dev_eui
+  `;
+}
+
+router.post("/iot/chirpstack/uplink", async (req, res) => {
+  const body = req.body || {};
+  const obj = decodedObject(body);
+  const deviceInfo = body.deviceInfo || {};
+  const rx0 = Array.isArray(body.rxInfo) ? (body.rxInfo[0] || {}) : {};
+
+  const devEui = normalizeDevEui(deviceInfo.devEui);
+  const deviceName = deviceInfo.deviceName || null;
+  const applicationName = deviceInfo.applicationName || null;
+  const rawPayload = jsonText(body);
+
+  await run(
+    `INSERT INTO iot_audit_logs(event_type,dev_eui,payload,source)
+     VALUES(?,?,?,?)`,
+    ["chirpstack_uplink", devEui || null, rawPayload, "chirpstack_http_integration"]
+  );
+
+  if (!devEui) {
+    return res.status(400).json({ ok: false, error: "deviceInfo.devEui missing" });
+  }
+
+  const receivedAt = new Date().toISOString();
+  const ua = numberFirst(obj, ["Ua", "UA", "uA", "voltage_a", "voltageA", "U_A"]);
+  const ub = numberFirst(obj, ["Ub", "UB", "uB", "voltage_b", "voltageB", "U_B"]);
+  const uc = numberFirst(obj, ["Uc", "UC", "uC", "voltage_c", "voltageC", "U_C"]);
+  const ia = numberFirst(obj, ["Ia", "IA", "iA", "current_a", "currentA", "I_A"]);
+  const ib = numberFirst(obj, ["Ib", "IB", "iB", "current_b", "currentB", "I_B"]);
+  const ic = numberFirst(obj, ["Ic", "IC", "iC", "current_c", "currentC", "I_C"]);
+  const totalPower = numberFirst(obj, ["totalP", "TotalP", "total_power", "totalPower", "P", "p", "power", "Power", "kW", "active_power", "activePower"]);
+  const ep = numberFirst(obj, ["EP", "Ep", "ep", "energy", "Energy", "kWh", "total_energy", "totalEnergy", "EQ_F1", "EQF1", "eq_f1"]);
+  const pf = numberFirst(obj, ["Pf", "PF", "pf", "power_factor", "powerFactor", "PowerFactor"]);
+  const reading = {
+    voltage: numberFirst(obj, ["voltage", "Voltage", "V", "U", "u"]) ?? ua,
+    current: numberFirst(obj, ["current", "Current", "A", "I", "i"]) ?? ia,
+    power: totalPower,
+    energy: ep,
+    frequency: numberFirst(obj, ["frequency", "Frequency", "Hz", "F", "f"]),
+    power_factor: pf,
+    ua,
+    ub,
+    uc,
+    ia,
+    ib,
+    ic,
+    total_power: totalPower,
+    ep,
+    pf,
+    do_state: stateOrNull(firstValue(obj, ["DO_State", "do_state", "DO", "do", "relay", "relayState"])),
+    di_state: stateOrNull(firstValue(obj, ["DI_State", "di_state", "DI", "di"])),
+    rssi: numberOrNull(rx0.rssi),
+    snr: numberOrNull(rx0.snr),
+    gateway_id: rx0.gatewayId || null,
+  };
+
+  const result = await run(
+    `INSERT INTO iot_meter_readings(
+       dev_eui,device_name,application_name,
+       voltage,current,power,energy,frequency,power_factor,
+       ua,ub,uc,ia,ib,ic,total_power,ep,pf,
+       do_state,di_state,rssi,snr,gateway_id,raw_payload,received_at
+     )
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [
+      devEui,
+      deviceName,
+      applicationName,
+      reading.voltage,
+      reading.current,
+      reading.power,
+      reading.energy,
+      reading.frequency,
+      reading.power_factor,
+      reading.ua,
+      reading.ub,
+      reading.uc,
+      reading.ia,
+      reading.ib,
+      reading.ic,
+      reading.total_power,
+      reading.ep,
+      reading.pf,
+      reading.do_state,
+      reading.di_state,
+      reading.rssi,
+      reading.snr,
+      reading.gateway_id,
+      rawPayload,
+      receivedAt,
+    ]
+  );
+
+  await run(
+    `UPDATE iot_device_commands
+     SET status='uplink_received'
+     WHERE id=(
+       SELECT id FROM iot_device_commands
+       WHERE dev_eui=? AND status IN ('queued','txack_received','ack_received')
+       ORDER BY datetime(requested_at) DESC, id DESC
+       LIMIT 1
+     )`,
+    [devEui]
+  ).catch(() => {});
+
+  res.json({ ok: true, id: result.id, devEui, received_at: receivedAt });
+});
+
+async function recordCommandEvent({ body, eventType, status, responseColumn }) {
+  const deviceInfo = body.deviceInfo || {};
+  const devEui = normalizeDevEui(deviceInfo.devEui || body.devEui || body.deviceName);
+  if (!devEui) return { ok: false, error: "deviceInfo.devEui missing" };
+  const command = await get(
+    `SELECT c.*, r.device_name
+     FROM iot_device_commands c
+     LEFT JOIN (
+       SELECT dev_eui, device_name, MAX(id) AS max_reading_id
+       FROM iot_meter_readings
+       GROUP BY dev_eui
+     ) r ON r.dev_eui=c.dev_eui
+     WHERE c.dev_eui=? AND c.status IN ('queued','txack_received','ack_received','uplink_received')
+     ORDER BY datetime(c.requested_at) DESC, c.id DESC
+     LIMIT 1`,
+    [devEui]
+  );
+  const auditPayload = {
+    devEui,
+    deviceName: command?.device_name || deviceInfo.deviceName || null,
+    model: command?.device_model || detectDeviceModel({ devEui, deviceName: command?.device_name || deviceInfo.deviceName }),
+    action: command?.action || null,
+    fPort: command?.f_port || null,
+    payloadHex: command?.payload_hex || null,
+    user: command?.requested_by || null,
+    timestamp: new Date().toISOString(),
+    txackResult: eventType === "chirpstack_txack" ? body : null,
+    ackResult: eventType === "chirpstack_ack" ? body : null,
+  };
+  const payload = jsonText(auditPayload);
+  await run(
+    `INSERT INTO iot_audit_logs(event_type,dev_eui,payload,source)
+     VALUES(?,?,?,?)`,
+    [eventType, devEui, payload, "chirpstack_http_integration"]
+  );
+  const column = responseColumn === "ack_response" ? "ack_response" : "txack_response";
+  await run(
+    `UPDATE iot_device_commands
+     SET status=?, ${column}=?
+     WHERE id=(
+       SELECT id FROM iot_device_commands
+       WHERE dev_eui=? AND status IN ('queued','txack_received','ack_received','uplink_received')
+       ORDER BY datetime(requested_at) DESC, id DESC
+       LIMIT 1
+     )`,
+    [status, payload, devEui]
+  );
+  return { ok: true, devEui, status };
+}
+
+router.post("/iot/chirpstack/txack", async (req, res) => {
+  const result = await recordCommandEvent({
+    body: req.body || {},
+    eventType: "chirpstack_txack",
+    status: "txack_received",
+    responseColumn: "txack_response",
+  });
+  res.status(result.ok ? 200 : 400).json(result);
+});
+
+router.post("/iot/chirpstack/ack", async (req, res) => {
+  const result = await recordCommandEvent({
+    body: req.body || {},
+    eventType: "chirpstack_ack",
+    status: "ack_received",
+    responseColumn: "ack_response",
+  });
+  res.status(result.ok ? 200 : 400).json(result);
+});
+
+router.get("/iot/devices/:devEui/latest", auth, async (req, res) => {
+  const devEui = normalizeDevEui(req.params.devEui);
+  const row = await get(
+    `${latestDeviceSelect("WHERE dev_eui=?")}
+     LIMIT 1`,
+    [devEui]
+  );
+  if (!row) return res.status(404).json({ error: "Device reading not found" });
+  res.json(row);
+});
+
+router.get("/iot/devices", auth, async (_req, res) => {
+  const rows = await all(`
+    ${latestDeviceSelect()}
+    ORDER BY datetime(l.received_at) DESC, l.device_name COLLATE NOCASE
+  `);
+  res.json(rows);
+});
+
+router.get("/iot/report", auth, async (req, res) => {
+  const range = iotReportRange(req.query.period);
+  const fromIso = range.from.toISOString();
+  const toIso = range.to.toISOString();
+  const readings = await all(
+    `SELECT id,dev_eui,device_name,received_at,voltage,current,power,energy,frequency,power_factor,
+            ua,ub,uc,ia,ib,ic,total_power,ep,pf,do_state,di_state,rssi,snr
+       FROM iot_meter_readings
+      WHERE datetime(received_at) >= datetime(?) AND datetime(received_at) < datetime(?)
+      ORDER BY dev_eui, datetime(received_at), id`,
+    [fromIso, toIso]
+  );
+  const commands = await all(
+    `SELECT dev_eui,device_model,action,status,f_port,payload_hex,requested_by,requested_by_role,requested_at
+       FROM iot_device_commands
+      WHERE datetime(requested_at) >= datetime(?) AND datetime(requested_at) < datetime(?)
+      ORDER BY datetime(requested_at), id`,
+    [fromIso, toIso]
+  );
+  const scheduleLogs = await all(
+    `SELECT category,valid_from,on_time,off_time,is_always_off
+       FROM light_schedule_logs
+      ORDER BY category, valid_from DESC, id DESC`
+  );
+
+  const byDev = new Map();
+  for (const row of readings) {
+    const key = normalizeDevEui(row.dev_eui);
+    if (!byDev.has(key)) byDev.set(key, []);
+    byDev.get(key).push(row);
+  }
+
+  const summaries = [...byDev.entries()].map(([devEui, rows]) => {
+    const first = rows[0] || {};
+    const last = rows[rows.length - 1] || {};
+    const config = IOT_NODE_CONFIG[devEui] || { category: "", lampCount: null, wattageW: null };
+    const capacityKw = Number(config.lampCount || 0) * Number(config.wattageW || 0) / 1000;
+    const onSamples = rows.filter(isReadingOn).length;
+    const values = field => rows.map(r => Number(r[field])).filter(Number.isFinite);
+    const minOf = field => {
+      const vals = values(field);
+      return vals.length ? Math.min(...vals) : null;
+    };
+    const maxOf = field => {
+      const vals = values(field);
+      return vals.length ? Math.max(...vals) : null;
+    };
+    const avgOf = field => {
+      const vals = values(field);
+      return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+    };
+    let offlineGaps = 0;
+    let maxGapMinutes = 0;
+    let prevTime = null;
+    let prevOn = null;
+    let scheduleKnownSamples = 0;
+    let scheduleOnSamples = 0;
+    let scheduleMatchedSamples = 0;
+    const transitions = [];
+    for (const row of rows) {
+      const t = new Date(row.received_at).getTime();
+      if (prevTime) {
+        const gap = (t - prevTime) / 60000;
+        if (gap > 20) offlineGaps += 1;
+        if (gap > maxGapMinutes) maxGapMinutes = gap;
+      }
+      const on = isReadingOn(row);
+      const schedule = activeScheduleFor(scheduleLogs, config.category, localDateKeyFromIso(row.received_at));
+      const expectedOn = scheduledOnAt(schedule, row.received_at);
+      if (expectedOn !== null) {
+        scheduleKnownSamples += 1;
+        if (expectedOn) scheduleOnSamples += 1;
+        if (expectedOn === on) scheduleMatchedSamples += 1;
+      }
+      if (prevOn !== null && prevOn !== on) {
+        transitions.push({
+          type: "relay_change",
+          at: row.received_at,
+          state: on ? "ON" : "OFF",
+          power: round(row.power, 3),
+          current: round(row.current, 2),
+        });
+      }
+      prevTime = t;
+      prevOn = on;
+    }
+    const commandsForDevice = commands
+      .filter(c => normalizeDevEui(c.dev_eui) === devEui)
+      .map(c => ({
+        type: "command",
+        at: c.requested_at,
+        action: c.action,
+        status: c.status,
+        model: c.device_model,
+      }));
+    const energyDelta = Number(last.energy) - Number(first.energy);
+    const avgPowerKw = avgOf("power");
+    const latestSchedule = activeScheduleFor(scheduleLogs, config.category, localDateKeyFromIso(last.received_at || new Date().toISOString()));
+    return {
+      devEui,
+      deviceName: last.device_name || first.device_name || devEui,
+      model: detectDeviceModel({ devEui, deviceName: last.device_name || first.device_name }),
+      samples: rows.length,
+      onSamples,
+      onPct: rows.length ? round((onSamples / rows.length) * 100, 1) : 0,
+      avgPowerKw: round(avgPowerKw, 3),
+      scheduleCategory: config.category || null,
+      scheduleOnTime: latestSchedule?.on_time || null,
+      scheduleOffTime: latestSchedule?.off_time || null,
+      expectedOnSamples: scheduleOnSamples,
+      expectedOnPct: scheduleKnownSamples ? round((scheduleOnSamples / scheduleKnownSamples) * 100, 1) : null,
+      scheduleMatchPct: scheduleKnownSamples ? round((scheduleMatchedSamples / scheduleKnownSamples) * 100, 1) : null,
+      lampCount: config.lampCount || null,
+      wattageW: config.wattageW || null,
+      maxCapacityKw: capacityKw ? round(capacityKw, 3) : null,
+      estimatedLitLamps: capacityKw && Number.isFinite(avgPowerKw) ? round(Math.min(config.lampCount, Math.max(0, avgPowerKw / (Number(config.wattageW) / 1000))), 1) : null,
+      estimatedLitPct: capacityKw && Number.isFinite(avgPowerKw) ? round(Math.min(100, Math.max(0, avgPowerKw / capacityKw * 100)), 1) : null,
+      minVoltage: round(minOf("voltage"), 1),
+      maxVoltage: round(maxOf("voltage"), 1),
+      minCurrent: round(minOf("current"), 2),
+      maxCurrent: round(maxOf("current"), 2),
+      minPowerKw: round(minOf("power"), 3),
+      maxPowerKw: round(maxOf("power"), 3),
+      energyStart: round(first.energy, 3),
+      energyEnd: round(last.energy, 3),
+      energyDeltaKwh: Number.isFinite(energyDelta) ? round(Math.max(0, energyDelta), 3) : null,
+      firstSeen: first.received_at || null,
+      lastSeen: last.received_at || null,
+      offlineGaps,
+      maxGapMinutes: round(maxGapMinutes, 1),
+      events: [...commandsForDevice, ...transitions].sort((a, b) => String(a.at).localeCompare(String(b.at))).slice(-20),
+    };
+  });
+
+  const totals = {
+    devices: summaries.length,
+    samples: summaries.reduce((sum, r) => sum + Number(r.samples || 0), 0),
+    onPct: summaries.length ? round(summaries.reduce((sum, r) => sum + Number(r.onPct || 0), 0) / summaries.length, 1) : 0,
+    energyDeltaKwh: round(summaries.reduce((sum, r) => sum + Number(r.energyDeltaKwh || 0), 0), 3),
+    avgPowerKw: summaries.length ? round(summaries.reduce((sum, r) => sum + Number(r.avgPowerKw || 0), 0), 3) : 0,
+    maxCapacityKw: round(summaries.reduce((sum, r) => sum + Number(r.maxCapacityKw || 0), 0), 3),
+    estimatedLitLamps: round(summaries.reduce((sum, r) => sum + Number(r.estimatedLitLamps || 0), 0), 1),
+    estimatedLitPct: summaries.reduce((sum, r) => sum + Number(r.maxCapacityKw || 0), 0)
+      ? round((summaries.reduce((sum, r) => sum + Number(r.avgPowerKw || 0), 0) / summaries.reduce((sum, r) => sum + Number(r.maxCapacityKw || 0), 0)) * 100, 1)
+      : null,
+    scheduleMatchPct: summaries.filter(r => r.scheduleMatchPct !== null).length
+      ? round(summaries.filter(r => r.scheduleMatchPct !== null).reduce((sum, r) => sum + Number(r.scheduleMatchPct || 0), 0) / summaries.filter(r => r.scheduleMatchPct !== null).length, 1)
+      : null,
+    offlineGaps: summaries.reduce((sum, r) => sum + Number(r.offlineGaps || 0), 0),
+    commands: commands.length,
+  };
+
+  res.json({
+    period: range.period,
+    label: range.label,
+    timezone: "Asia/Ulaanbaatar",
+    from: fromIso,
+    to: toIso,
+    totals,
+    devices: summaries.sort((a, b) => String(a.deviceName).localeCompare(String(b.deviceName))),
+    commands: commands.slice(-50),
+  });
+});
+
+router.get("/iot/timeseries", auth, async (req, res) => {
+  const range = iotReportRange(req.query.period);
+  const devEui = normalizeDevEui(req.query.devEui || "");
+  const bucketMinutes = Math.max(1, Math.min(240, Number(req.query.bucket || 15)));
+  const fromIso = range.from.toISOString();
+  const toIso = range.to.toISOString();
+  const params = [fromIso, toIso];
+  let whereDev = "";
+  if (devEui) {
+    whereDev = " AND UPPER(dev_eui)=?";
+    params.push(devEui);
+  }
+  const rows = await all(
+    `SELECT id,dev_eui,device_name,received_at,voltage,current,power,energy,do_state
+       FROM iot_meter_readings
+      WHERE datetime(received_at) >= datetime(?) AND datetime(received_at) < datetime(?)
+      ${whereDev}
+      ORDER BY dev_eui, datetime(received_at), id`,
+    params
+  );
+  const buckets = new Map();
+  for (const row of rows) {
+    const t = new Date(row.received_at).getTime();
+    if (!Number.isFinite(t)) continue;
+    const bucketStartMs = Math.floor(t / (bucketMinutes * 60000)) * bucketMinutes * 60000;
+    const key = `${normalizeDevEui(row.dev_eui)}:${bucketStartMs}`;
+    if (!buckets.has(key)) {
+      buckets.set(key, {
+        devEui: normalizeDevEui(row.dev_eui),
+        deviceName: row.device_name || normalizeDevEui(row.dev_eui),
+        bucketStart: new Date(bucketStartMs).toISOString(),
+        samples: 0,
+        onSamples: 0,
+        powerSum: 0,
+        voltageSum: 0,
+        currentSum: 0,
+        powerCount: 0,
+        voltageCount: 0,
+        currentCount: 0,
+        firstEnergy: null,
+        lastEnergy: null,
+      });
+    }
+    const b = buckets.get(key);
+    b.samples += 1;
+    if (isReadingOn(row)) b.onSamples += 1;
+    const power = Number(row.power);
+    const voltage = Number(row.voltage);
+    const current = Number(row.current);
+    const energy = Number(row.energy);
+    if (Number.isFinite(power)) { b.powerSum += power; b.powerCount += 1; }
+    if (Number.isFinite(voltage)) { b.voltageSum += voltage; b.voltageCount += 1; }
+    if (Number.isFinite(current)) { b.currentSum += current; b.currentCount += 1; }
+    if (Number.isFinite(energy)) {
+      if (b.firstEnergy === null) b.firstEnergy = energy;
+      b.lastEnergy = energy;
+    }
+  }
+  const series = [...buckets.values()].map(b => ({
+    devEui: b.devEui,
+    deviceName: b.deviceName,
+    bucketStart: b.bucketStart,
+    samples: b.samples,
+    avgPowerKw: b.powerCount ? round(b.powerSum / b.powerCount, 3) : null,
+    avgVoltage: b.voltageCount ? round(b.voltageSum / b.voltageCount, 1) : null,
+    avgCurrent: b.currentCount ? round(b.currentSum / b.currentCount, 2) : null,
+    onPct: b.samples ? round((b.onSamples / b.samples) * 100, 1) : 0,
+    energyDeltaKwh: Number.isFinite(Number(b.lastEnergy) - Number(b.firstEnergy)) ? round(Math.max(0, Number(b.lastEnergy) - Number(b.firstEnergy)), 3) : null,
+    energyKwh: b.lastEnergy,
+  })).sort((a, b) => String(a.bucketStart).localeCompare(String(b.bucketStart)));
+  res.json({
+    period: range.period,
+    label: range.label,
+    timezone: "Asia/Ulaanbaatar",
+    from: fromIso,
+    to: toIso,
+    bucketMinutes,
+    devEui: devEui || null,
+    series,
+  });
+});
+
+router.post("/iot/devices/:devEui/downlink", auth, requirePermission("lighting_edit"), async (req, res) => {
+  const devEui = normalizeDevEui(req.params.devEui);
+  const action = String(req.body?.action || req.body?.command || "").trim().toUpperCase();
+  const rawRequest = {
+    params: { devEui: req.params.devEui },
+    body: req.body || {},
+    requestedBy: req.user?.id || null,
+    requestedByRole: req.user?.role || null,
+  };
+
+  const latest = await get(
+    `SELECT dev_eui, device_name FROM iot_meter_readings WHERE dev_eui=? ORDER BY datetime(received_at) DESC, id DESC LIMIT 1`,
+    [devEui]
+  );
+  if (!latest) return res.status(404).json({ error: "Device not found" });
+
+  const model = detectDeviceModel({ devEui, deviceName: latest.device_name });
+  let config;
+  try {
+    config = validateDownlinkRequest({ devEui, action, model });
+  } catch (e) {
+    await run(
+      `INSERT INTO iot_audit_logs(event_type,dev_eui,payload,source)
+       VALUES(?,?,?,?)`,
+      ["chirpstack_downlink", devEui || null, jsonText({
+        rawRequest,
+        devEui,
+        deviceName: latest.device_name || null,
+        model,
+        action,
+        user: req.user?.id || null,
+        timestamp: new Date().toISOString(),
+        ok: false,
+        error: e.message,
+      }), "erp_backend"]
+    );
+    return res.status(400).json({ error: e.message });
+  }
+
+  let auditPayload = {
+    rawRequest,
+    devEui,
+    deviceName: latest.device_name || null,
+    model,
+    action,
+    fPort: config.fPort,
+    payloadHex: config.payloadHex,
+    user: req.user?.id || null,
+    timestamp: new Date().toISOString(),
+    txackResult: null,
+    ackResult: null,
+  };
+
+  try {
+    const result = await enqueueChirpStackDownlink({ devEui, action, model });
+    const chirpstackQueueResult = result.chirpstackQueueResult;
+    await run(
+      `INSERT INTO iot_device_commands(dev_eui,device_model,action,f_port,payload_hex,status,chirpstack_response,requested_by,requested_by_role)
+       VALUES(?,?,?,?,?,?,?,?,?)`,
+      [devEui, model, action, result.fPort, result.payloadHex, "queued", jsonText(chirpstackQueueResult), req.user?.id || null, req.user?.role || null]
+    );
+    auditPayload = { ...auditPayload, ok: true, chirpstackQueueResult };
+    await run(
+      `INSERT INTO iot_audit_logs(event_type,dev_eui,payload,source)
+       VALUES(?,?,?,?)`,
+      ["chirpstack_downlink", devEui, jsonText(auditPayload), "erp_backend"]
+    );
+    res.json({
+      devEui,
+      deviceName: latest.device_name || null,
+      model,
+      action,
+      fPort: result.fPort,
+      payloadHex: result.payloadHex,
+      chirpstackQueueResult,
+      status: "queued",
+    });
+  } catch (e) {
+    await run(
+      `INSERT INTO iot_device_commands(dev_eui,device_model,action,f_port,payload_hex,status,chirpstack_response,requested_by,requested_by_role)
+       VALUES(?,?,?,?,?,?,?,?,?)`,
+      [devEui, model, action, config.fPort, config.payloadHex, "failed", jsonText({ error: e.message }), req.user?.id || null, req.user?.role || null]
+    );
+    auditPayload = { ...auditPayload, ok: false, error: e.message };
+    await run(
+      `INSERT INTO iot_audit_logs(event_type,dev_eui,payload,source)
+       VALUES(?,?,?,?)`,
+      ["chirpstack_downlink", devEui, jsonText(auditPayload), "erp_backend"]
+    );
+    res.status(502).json({ error: e.message || "Downlink failed" });
+  }
+});
+
+module.exports = router;

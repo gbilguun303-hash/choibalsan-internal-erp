@@ -2,6 +2,8 @@ import { api, table, state, today, escapeHtml, toast } from './common.js';
 
 let _rptCatFilter = new Set(); // empty = show all
 let _workCats     = [];
+let _rptReloadTimer = null;
+let _rptRenderSeq = 0;
 
 const FREQ_OPTS = ["Өдөр тутам","7 хоног","Сар тутам","Улирал тутам","Хагас жил","Жил тутам","Нэг удаа"];
 
@@ -46,7 +48,7 @@ async function report_schedule() {
       ${canEdit ? `<button class="btn" onclick="rsOpenForm(0)">+ Хуваарь нэмэх</button>` : ""}
     </div>
 
-    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:18px">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:18px">
       <div style="background:#fff;border:1px solid #e2e6ed;border-radius:12px;padding:14px 16px;border-top:3px solid #2563eb">
         <div style="font-size:11px;color:#667085;margin-bottom:4px;text-transform:uppercase">Нийт хуваарь</div>
         <div style="font-size:24px;font-weight:800;color:#2563eb">${rows.filter(r=>r.is_active).length}</div>
@@ -225,12 +227,105 @@ function _rptVals() {
   return { y, m };
 }
 
-function reloadReports() { reports(); }
+let _rptCache = null; // { year, allWork, execs }
+let _rptDelegatedEventsBound = false;
+
+function reloadReports() {
+  const { y } = _rptVals();
+  // flush cache only when year changes so month switches reuse cached data
+  if (_rptCache && _rptCache.year !== y) _rptCache = null;
+  clearTimeout(_rptReloadTimer);
+  _rptReloadTimer = setTimeout(() => reports(), 80);
+}
+
+function bindReportDelegatedEvents() {
+  if (_rptDelegatedEventsBound) return;
+  _rptDelegatedEventsBound = true;
+  document.addEventListener("change", (ev) => {
+    if (ev.target?.id === "rptYear" || ev.target?.id === "rptMonth") reloadReports();
+  });
+  window.addEventListener("focus", () => {
+    if (document.getElementById("rptYear") && document.getElementById("rptMonth")) {
+      document.getElementById("rptYear").disabled = false;
+      document.getElementById("rptMonth").disabled = false;
+    }
+  });
+}
+
+function reportPhotoSrc(photo) {
+  const raw = photo?.file_path || photo?.filename || "";
+  if (!raw) return "";
+  const path = raw.startsWith("/uploads/")
+    ? raw
+    : `/uploads/${raw.replace(/^\/?uploads\//, "").replace(/^\/+/, "")}`;
+  return `${location.origin}${path}`;
+}
+
+function rptIsDoneStatus(status = "") {
+  return ["Хаагдсан", "Дууссан"].includes(status);
+}
+
+function rptWorkProgress(work, workExecs = []) {
+  if (rptIsDoneStatus(work.status)) return 100;
+  const nums = workExecs
+    .map(e => Number(e.progress || 0))
+    .filter(n => Number.isFinite(n));
+  if (nums.length) return Math.round(nums.reduce((s, n) => s + n, 0) / nums.length);
+  return Number(work.progress || 0);
+}
+
+function rptIsOverdue(work) {
+  if (rptIsDoneStatus(work.status)) return false;
+  if (!work.end_date) return false;
+  const end = new Date(work.end_date);
+  const now = new Date();
+  end.setHours(0, 0, 0, 0);
+  now.setHours(0, 0, 0, 0);
+  return end < now;
+}
+
+function rptExecMap(execRows = []) {
+  const map = new Map();
+  for (const e of execRows) {
+    const key = Number(e.work_log_id);
+    const list = map.get(key) || [];
+    list.push(e);
+    map.set(key, list);
+  }
+  return map;
+}
+
+function rptWorkRows(workRows, execRowsOrMap) {
+  const execMap = execRowsOrMap instanceof Map ? execRowsOrMap : rptExecMap(execRowsOrMap);
+  return workRows.map(r => {
+    const wExecs = execMap.get(Number(r.id)) || [];
+    const displayProgress = rptWorkProgress(r, wExecs);
+    return { ...r, _execs: wExecs, _displayProgress: displayProgress, _overdue: rptIsOverdue(r) };
+  });
+}
+
+function rptGroupByCategory(rows) {
+  const groups = new Map();
+  for (const r of rows) {
+    const key = r.category || "Бусад";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  }
+  return [...groups.entries()].map(([category, items]) => ({ category, items }));
+}
+
+function rptBadge(text, color = "#2563eb", bg = "#eff6ff") {
+  return `<span style="display:inline-block;margin:2px 4px 0 0;padding:2px 7px;border-radius:20px;background:${bg};color:${color};font-size:9px;font-weight:700;white-space:nowrap">${text}</span>`;
+}
 
 async function reports() {
+  bindReportDelegatedEvents();
+  const renderSeq = ++_rptRenderSeq;
   const now = new Date();
   const savedY = document.getElementById("rptYear")?.value;
   const savedM = document.getElementById("rptMonth")?.value;
+
+  if (!savedY) _rptCatFilter.clear();
 
   const initYear  = savedY ? Number(savedY)  : now.getFullYear();
   const initMonth = savedM ? Number(savedM)  : now.getMonth()+1;
@@ -238,28 +333,41 @@ async function reports() {
   const MN_MONTHS = ["","1-р сар","2-р сар","3-р сар","4-р сар","5-р сар",
     "6-р сар","7-р сар","8-р сар","9-р сар","10-р сар","11-р сар","12-р сар"];
 
-  main.innerHTML = `<div style="text-align:center;padding:40px;color:#667085">⏳ Уншиж байна...</div>`;
-
-  let allWork = [], execs = [];
-  try { allWork = await api("/api/work-logs"); } catch(e) {}
-  try { execs   = await api(`/api/executions?year=${initYear}`); } catch(e) {}
-  try { _workCats = await api("/api/work-categories"); } catch(e) {}
-  if (!_workCats.length) {
-    const catNames = [...new Set(allWork.map(r=>r.category||"").filter(Boolean))];
-    _workCats = catNames.map(n => ({ name: n, icon: "📋", color: "#2563eb" }));
+  let allWork = [], execs = [], execMap = new Map();
+  if (_rptCache && _rptCache.year === initYear) {
+    allWork = _rptCache.allWork;
+    execs   = _rptCache.execs;
+    execMap = _rptCache.execMap || rptExecMap(execs);
+  } else {
+    main.innerHTML = `<div style="text-align:center;padding:40px;color:#667085">⏳ Уншиж байна...</div>`;
+    try { allWork = await api("/api/work-logs"); } catch(e) {}
+    try { execs   = await api(`/api/executions?year=${initYear}`); } catch(e) {}
+    execMap = rptExecMap(execs);
+    try { _workCats = await api("/api/work-categories"); } catch(e) {}
+    if (renderSeq !== _rptRenderSeq) return;
+    if (!_workCats.length) {
+      const catNames = [...new Set(allWork.map(r=>r.category||"").filter(Boolean))];
+      _workCats = catNames.map(n => ({ name: n, icon: "📋", color: "#2563eb" }));
+    }
+    _rptCache = { year: initYear, allWork, execs, execMap };
   }
 
   const mm = String(initMonth).padStart(2,"0");
   const prefix = `${initYear}-${mm}`;
+  const execWorkIdsInMonth = new Set();
+  for (const e of execs) {
+    if ((e.start_date || "").startsWith(prefix) || (e.end_date || "").startsWith(prefix)) {
+      execWorkIdsInMonth.add(e.work_log_id);
+    }
+  }
 
-  const filtered = allWork.filter(r => {
+  const filtered = rptWorkRows(allWork.filter(r => {
     const d = r.start_date || r.work_date || "";
     return d.startsWith(prefix) || (r.end_date||"").startsWith(prefix) ||
-           execs.some(e => e.work_log_id === r.id && (
-             (e.start_date||"").startsWith(prefix) || (e.end_date||"").startsWith(prefix)));
-  }).filter(r => _rptCatFilter.size === 0 || _rptCatFilter.has(r.category || ""));
+           execWorkIdsInMonth.has(r.id);
+  }).filter(r => _rptCatFilter.size === 0 || _rptCatFilter.has(r.category || "")), execMap);
 
-  const done    = filtered.filter(r => r.status === "Дууссан").length;
+  const done    = filtered.filter(r => ["Хаагдсан","Дууссан"].includes(r.status)).length;
   const ongoing = filtered.filter(r => r.status === "Явцтай").length;
   const waiting = filtered.filter(r => r.status === "Хүлээгдэж байгаа" || r.status === "Эхэлсэн").length;
 
@@ -270,10 +378,10 @@ async function reports() {
       <div style="font-size:12px;color:#667085">Сар сонгоод тайланг хэвлэнэ үү</div>
     </div>
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-      <select id="rptYear" class="input" style="width:80px" onchange="reloadReports()">
+      <select id="rptYear" class="input" style="width:80px">
         ${[2024,2025,2026,2027].map(y=>`<option value="${y}" ${y===initYear?"selected":""}>${y}</option>`).join("")}
       </select>
-      <select id="rptMonth" class="input" style="width:100px" onchange="reloadReports()">
+      <select id="rptMonth" class="input" style="width:100px">
         ${MN_MONTHS.slice(1).map((m,i)=>`<option value="${i+1}" ${i+1===initMonth?"selected":""}>${m}</option>`).join("")}
       </select>
       <button class="btn" onclick="const v=_rptVals();printWorkReport(v.y,v.m,false)" style="padding:6px 14px">🖨️ Зураггүй</button>
@@ -303,7 +411,7 @@ async function reports() {
     }).join("")}
   </div>
 
-  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px">
     <div class="panel" style="padding:12px 16px;border-top:3px solid #2563eb;margin:0">
       <div style="font-size:10px;color:#667085;margin-bottom:4px">НИЙТ АЖИЛ</div>
       <div style="font-size:24px;font-weight:900;color:#2563eb">${filtered.length}</div>
@@ -337,18 +445,25 @@ async function reports() {
       </thead>
       <tbody>
         ${filtered.length ? filtered.map((r,i) => {
-          const wExecs = execs.filter(e => e.work_log_id === r.id);
-          const prog = r.progress || 0;
+          const wExecs = r._execs || [];
+          const prog = r._displayProgress ?? r.progress ?? 0;
           const progColor = prog===100?'#16a34a':prog>=50?'#2563eb':'#d97706';
           const statusBg  = r.status==='Дууссан'?'#dcfce7':r.status==='Явцтай'?'#dbeafe':'#f1f5f9';
           const statusCl  = r.status==='Дууссан'?'#16a34a':r.status==='Явцтай'?'#1d4ed8':'#475569';
+          const badges = [
+            r._overdue ? rptBadge("Хугацаа хэтэрсэн", "#dc2626", "#fee2e2") : "",
+            Number(r.material_count || 0) > 0 ? rptBadge(`Материал ${r.material_count}`, "#0ea5e9", "#e0f2fe") : "",
+            Number(r.photo_count || 0) > 0 || wExecs.some(e => Number(e.photo_count || 0) > 0) ? rptBadge("Зурагтай", "#16a34a", "#dcfce7") : "",
+            r.confirm_status === "confirmed" ? rptBadge("Батлагдсан", "#16a34a", "#dcfce7") : "",
+          ].join("");
           return `
-          <tr style="border-bottom:1px solid #f1f5f9">
+          <tr style="border-bottom:1px solid #f1f5f9;${r._overdue ? "background:#fff7ed" : ""}">
             <td style="padding:10px 12px;color:#94a3b8;font-size:11px;vertical-align:top">${i+1}</td>
             <td style="padding:10px 12px;vertical-align:top">
               <div style="font-weight:700;font-size:12px">${escapeHtml(r.title||"")}</div>
               <div style="font-size:11px;color:#667085">${escapeHtml(r.location||"")}</div>
               ${r.category?`<div style="font-size:10px;color:#94a3b8">${escapeHtml(r.category)}</div>`:""}
+              <div>${badges}</div>
             </td>
             <td style="padding:10px 12px;font-size:11px;color:#344054;vertical-align:top;white-space:nowrap">
               ${r.start_date||r.work_date||""}<br><span style="color:#94a3b8">~</span> ${r.end_date||""}
@@ -364,7 +479,7 @@ async function reports() {
             </td>
             <td style="padding:10px 12px;vertical-align:top;white-space:nowrap">
               <span style="font-size:10px;padding:2px 8px;border-radius:20px;background:${statusBg};color:${statusCl};font-weight:600">${r.status||""}</span>
-              ${r.confirm_status==="confirmed"?`<div style="font-size:9px;color:#16a34a;margin-top:2px">✅ Батлагдсан</div>`:""}
+              ${r._overdue ? `<div style="font-size:9px;color:#dc2626;margin-top:2px;font-weight:700">Хугацаа хэтэрсэн</div>` : ""}
             </td>
             <td style="padding:10px 12px;vertical-align:top;min-width:160px">
               ${wExecs.length ? wExecs.map((ex,j) => `
@@ -377,7 +492,7 @@ async function reports() {
             </td>
           </tr>`;
         }).join("") : `<tr><td colspan="7" style="padding:30px;text-align:center;color:#94a3b8">
-          ${MN_MONTHS[_rptMonth]} ${_rptYear} онд ажил бүртгэгдээгүй байна
+          ${MN_MONTHS[initMonth]} ${initYear} онд ажил бүртгэгдээгүй байна
         </td></tr>`}
       </tbody>
     </table>
@@ -397,27 +512,239 @@ async function reports() {
   </div>`;
 }
 
+function rptPrintChart(filtered) {
+  const statusRows = [
+    { label: "Дууссан", value: filtered.filter(r => rptIsDoneStatus(r.status)).length, color: "#16a34a" },
+    { label: "Явцтай", value: filtered.filter(r => r.status === "Явцтай").length, color: "#6366f1" },
+    { label: "Хүлээгдэж буй", value: filtered.filter(r => r.status === "Хүлээгдэж байгаа" || r.status === "Эхэлсэн").length, color: "#d97706" },
+    { label: "Хугацаа хэтэрсэн", value: filtered.filter(r => r._overdue).length, color: "#dc2626" },
+  ];
+  const groups = rptGroupByCategory(filtered).slice(0, 7).map(g => {
+    const avg = g.items.length ? Math.round(g.items.reduce((s, r) => s + Number(r._displayProgress || 0), 0) / g.items.length) : 0;
+    return { label: g.category, count: g.items.length, avg };
+  });
+
+  const W = 1040, H = 158, leftW = 360, pad = 18;
+  const maxStatus = Math.max(1, ...statusRows.map(r => r.value));
+  const maxGroup = Math.max(1, ...groups.map(r => r.count));
+  const statusSvg = statusRows.map((r, i) => {
+    const y = 36 + i * 27;
+    const bw = Math.round((r.value / maxStatus) * 220);
+    return `
+      <text x="${pad}" y="${y+11}" font-size="11" fill="#334155" font-weight="700">${r.label}</text>
+      <rect x="122" y="${y}" width="205" height="14" rx="7" fill="#eef2f7"/>
+      <rect x="122" y="${y}" width="${Math.round((r.value / maxStatus) * 205)}" height="14" rx="7" fill="${r.color}"/>
+      <text x="${338}" y="${y+11}" font-size="11" fill="${r.color}" font-weight="800" text-anchor="end">${r.value}</text>`;
+  }).join("");
+
+  const groupSvg = groups.length ? groups.map((r, i) => {
+    const y = 36 + i * 17;
+    const countW = Math.round((r.count / maxGroup) * 155);
+    const progW = Math.round((r.avg / 100) * 155);
+    return `
+      <text x="${leftW + 18}" y="${y+10}" font-size="10" fill="#334155" font-weight="700">${escapeHtml(String(r.label).slice(0, 26))}${String(r.label).length > 26 ? "..." : ""}</text>
+      <rect x="${leftW + 198}" y="${y}" width="155" height="9" rx="5" fill="#eef2f7"/>
+      <rect x="${leftW + 198}" y="${y}" width="${countW}" height="9" rx="5" fill="#2563eb"/>
+      <text x="${leftW + 362}" y="${y+8}" font-size="9" fill="#2563eb" font-weight="800">${r.count}</text>
+      <rect x="${leftW + 400}" y="${y}" width="155" height="9" rx="5" fill="#eef2f7"/>
+      <rect x="${leftW + 400}" y="${y}" width="${progW}" height="9" rx="5" fill="${r.avg >= 80 ? "#16a34a" : r.avg >= 40 ? "#f59e0b" : "#dc2626"}"/>
+      <text x="${leftW + 564}" y="${y+8}" font-size="9" fill="#334155" font-weight="800">${r.avg}%</text>`;
+  }).join("") : `<text x="${leftW + 18}" y="86" font-size="12" fill="#94a3b8">Категорийн график харуулах мэдээлэл алга</text>`;
+
+  return `
+  <div class="chart-box">
+    <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" role="img" aria-label="Ажлын явцын график">
+      <rect x="0" y="0" width="${W}" height="${H}" rx="12" fill="#f8fafc" stroke="#dbe3ef"/>
+      <text x="${pad}" y="22" font-size="13" fill="#0f172a" font-weight="900">Төлөвийн график</text>
+      <text x="${leftW + 18}" y="22" font-size="13" fill="#0f172a" font-weight="900">Категориор: ажил тоо / дундаж явц</text>
+      <text x="${leftW + 198}" y="33" font-size="8" fill="#64748b" font-weight="700">АЖИЛ</text>
+      <text x="${leftW + 400}" y="33" font-size="8" fill="#64748b" font-weight="700">ЯВЦ</text>
+      <line x1="${leftW}" y1="16" x2="${leftW}" y2="${H-16}" stroke="#dbe3ef"/>
+      ${statusSvg}
+      ${groupSvg}
+    </svg>
+  </div>`;
+}
+
+function rptPrintCameraChart(cameraData, year, month) {
+  const monthKey = `${year}-${String(month).padStart(2, "0")}`;
+  const daily = (cameraData?.daily || [])
+    .filter(d => String(d.day || "").startsWith(monthKey) && d.availability_pct != null)
+    .sort((a, b) => String(a.day).localeCompare(String(b.day)));
+  if (!daily.length) return "";
+
+  const W = 520, H = 220, PL = 44, PR = 58, PT = 38, PB = 32;
+  const cw = W - PL - PR;
+  const ch = H - PT - PB;
+  const pctVals = daily.map(d => Number(d.availability_pct)).filter(Number.isFinite);
+  const minY = Math.max(0, Math.floor((Math.min(...pctVals) - 4) / 5) * 5);
+  const maxY = 100;
+  const range = Math.max(1, maxY - minY);
+  const xOf = i => PL + (daily.length > 1 ? i / (daily.length - 1) * cw : cw / 2);
+  const yOf = v => PT + ch - ((Math.max(minY, Math.min(maxY, Number(v))) - minY) / range) * ch;
+
+  let grid = "";
+  for (let v = minY; v <= maxY + 0.001; v += 5) {
+    const y = yOf(v);
+    grid += `<line x1="${PL}" y1="${y.toFixed(1)}" x2="${W-PR}" y2="${y.toFixed(1)}" stroke="#e2e8f0"/>`;
+    grid += `<text x="${PL-7}" y="${(y+3).toFixed(1)}" font-size="8" fill="#64748b" text-anchor="end">${v}%</text>`;
+  }
+  const pts = daily.map((d, i) => ({ x: xOf(i), y: yOf(d.availability_pct), v: Number(d.availability_pct), d }));
+  const path = pts.map((p, i) => `${i ? "L" : "M"}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+  const labels = pts.map((p, i) => {
+    const day = String(p.d.day || "").slice(8);
+    const showX = daily.length <= 12 || i % 2 === 0 || i === daily.length - 1;
+    return `${showX ? `<text x="${p.x.toFixed(1)}" y="${H-8}" font-size="8" fill="#64748b" text-anchor="middle">${day}</text>` : ""}
+      <circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="3.5" fill="#7c3aed" stroke="#fff" stroke-width="1.4"/>`;
+  }).join("");
+  const last = pts.at(-1);
+  const summary = cameraData?.summary || {};
+
+  return `
+  <div class="chart-box camera-chart">
+    <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" role="img" aria-label="Камерын ажиллагааны график">
+      <rect x="0" y="0" width="${W}" height="${H}" rx="12" fill="#fbfdff" stroke="#dbe3ef"/>
+      <text x="16" y="20" font-size="14" fill="#0f172a" font-weight="900">Камерын ажиллагааны хувь</text>
+      <text x="${W-12}" y="20" font-size="10" fill="#475569" text-anchor="end" font-weight="700">
+        ${Number(summary.capacity || 0).toLocaleString("mn-MN")} нийт · ${Number(summary.broken_cameras || 0).toLocaleString("mn-MN")} гэмтэл · ${(summary.availability_pct == null ? last?.v : Number(summary.availability_pct)).toFixed(1)}%
+      </text>
+      ${grid}
+      <path d="${path}" fill="none" stroke="#7c3aed" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+      ${labels}
+      ${last ? `<text x="${(last.x+8).toFixed(1)}" y="${(last.y+4).toFixed(1)}" font-size="10" fill="#7c3aed" font-weight="900" stroke="#fff" stroke-width="4" paint-order="stroke">${last.v.toFixed(1)}%</text>` : ""}
+      <line x1="${PL}" y1="${PT}" x2="${PL}" y2="${H-PB}" stroke="#cbd5e1"/>
+      <line x1="${PL}" y1="${H-PB}" x2="${W-PR}" y2="${H-PB}" stroke="#cbd5e1"/>
+    </svg>
+  </div>`;
+}
+
+function rptPrintLightingChart(snaps, year, month) {
+  const monthKey = `${year}-${String(month).padStart(2, "0")}`;
+  const rows = (snaps || [])
+    .filter(s => String(s.snapshot_date || "").startsWith(monthKey) && s.availability_pct != null)
+    .sort((a, b) => String(a.snapshot_date).localeCompare(String(b.snapshot_date)));
+  if (!rows.length) return "";
+
+  const cats = [
+    { key: "Авто замын гэрэл", color: "#f59e0b", label: "Авто зам" },
+    { key: "Гэр хорооллын гэрэл", color: "#0ea5e9", label: "Гэр хороолол" },
+    { key: "Цамхагийн гэрэл", color: "#8b5cf6", label: "Цамхаг" },
+    { key: "Гэрлэн дохио", color: "#10b981", label: "Дохио" },
+  ];
+  const byDate = {};
+  rows.forEach(s => {
+    const d = String(s.snapshot_date || "").slice(0, 10);
+    if (!byDate[d]) byDate[d] = {};
+    byDate[d][s.category] = Number(s.availability_pct);
+  });
+  const dates = Object.keys(byDate).sort();
+  const values = [];
+  dates.forEach(d => cats.forEach(c => {
+    if (byDate[d][c.key] != null) values.push(byDate[d][c.key]);
+  }));
+  if (!dates.length || !values.length) return "";
+
+  const W = 520, H = 220, PL = 44, PR = 72, PT = 50, PB = 32;
+  const cw = W - PL - PR;
+  const ch = H - PT - PB;
+  const minY = Math.max(0, Math.floor((Math.min(...values) - 4) / 5) * 5);
+  const maxY = Math.min(100, Math.max(100, Math.ceil(Math.max(...values) / 5) * 5));
+  const range = Math.max(1, maxY - minY);
+  const xOf = i => PL + (dates.length > 1 ? i / (dates.length - 1) * cw : cw / 2);
+  const yOf = v => PT + ch - ((Math.max(minY, Math.min(maxY, Number(v))) - minY) / range) * ch;
+
+  let grid = "";
+  for (let v = minY; v <= maxY + 0.001; v += 5) {
+    const y = yOf(v);
+    grid += `<line x1="${PL}" y1="${y.toFixed(1)}" x2="${W-PR}" y2="${y.toFixed(1)}" stroke="#e2e8f0"/>`;
+    grid += `<text x="${PL-6}" y="${(y+3).toFixed(1)}" font-size="8" fill="#64748b" text-anchor="end">${v}%</text>`;
+  }
+  const labelSlots = [];
+  function labelYFor(x, y) {
+    let ly = y + 3;
+    for (let i = 0; i < 8 && labelSlots.some(s => Math.abs(s.x - x) < 42 && Math.abs(s.y - ly) < 12); i++) {
+      ly = y + 3 + (i % 2 === 0 ? -1 : 1) * 12 * Math.ceil((i + 1) / 2);
+      ly = Math.max(PT + 8, Math.min(H - PB - 8, ly));
+    }
+    labelSlots.push({ x, y: ly });
+    return ly;
+  }
+  const lines = cats.map(c => {
+    const pts = dates.map((d, i) => byDate[d][c.key] == null ? null : { x: xOf(i), y: yOf(byDate[d][c.key]), v: byDate[d][c.key] }).filter(Boolean);
+    if (!pts.length) return "";
+    const path = pts.map((p, i) => `${i ? "L" : "M"}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+    const last = pts.at(-1);
+    const lastLabelY = labelYFor(last.x + 6, last.y);
+    return `<path d="${path}" fill="none" stroke="${c.color}" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>
+      ${pts.map(p => `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="2.8" fill="${c.color}" stroke="#fff" stroke-width="1"/>`).join("")}
+      <text x="${(last.x+6).toFixed(1)}" y="${lastLabelY.toFixed(1)}" font-size="8.5" fill="${c.color}" font-weight="900" stroke="#fff" stroke-width="3" paint-order="stroke">${last.v.toFixed(1)}%</text>`;
+  }).join("");
+  const xLabels = dates.map((d, i) => {
+    const show = dates.length <= 10 || i % 2 === 0 || i === dates.length - 1;
+    return show ? `<text x="${xOf(i).toFixed(1)}" y="${H-7}" font-size="8" fill="#64748b" text-anchor="middle">${d.slice(8)}</text>` : "";
+  }).join("");
+  const legend = cats.map((c, i) => `<text x="${16 + i * 118}" y="35" font-size="8.5" fill="${c.color}" font-weight="800">━ ${c.label}</text>`).join("");
+
+  return `
+  <div class="chart-box lighting-chart">
+    <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" role="img" aria-label="Гэрэлтүүлгийн асалтын график">
+      <rect x="0" y="0" width="${W}" height="${H}" rx="12" fill="#fbfdff" stroke="#dbe3ef"/>
+      <text x="16" y="20" font-size="14" fill="#0f172a" font-weight="900">Гэрэлтүүлгийн асалтын хувь</text>
+      ${legend}
+      ${grid}${lines}${xLabels}
+      <line x1="${PL}" y1="${PT}" x2="${PL}" y2="${H-PB}" stroke="#cbd5e1"/>
+      <line x1="${PL}" y1="${H-PB}" x2="${W-PR}" y2="${H-PB}" stroke="#cbd5e1"/>
+    </svg>
+  </div>`;
+}
+
 async function printWorkReport(year, month, withImages = false) {
+  document.getElementById("rptYear")?.blur();
+  document.getElementById("rptMonth")?.blur();
   const MN_MONTHS = ["","1-р сар","2-р сар","3-р сар","4-р сар","5-р сар",
     "6-р сар","7-р сар","8-р сар","9-р сар","10-р сар","11-р сар","12-р сар"];
 
   let allWork = [], execs = [];
   try { allWork = await api("/api/work-logs"); } catch(e) {}
   try { execs   = await api(`/api/executions?year=${year}`); } catch(e) {}
+  const execMap = rptExecMap(execs);
 
   const mm = String(month).padStart(2,"0");
   const prefix = `${year}-${mm}`;
-  const filtered = allWork.filter(r => {
+  const execWorkIdsInMonth = new Set();
+  for (const e of execs) {
+    if ((e.start_date || "").startsWith(prefix) || (e.end_date || "").startsWith(prefix)) {
+      execWorkIdsInMonth.add(e.work_log_id);
+    }
+  }
+  const filtered = rptWorkRows(allWork.filter(r => {
     const d = r.start_date || r.work_date || "";
     return d.startsWith(prefix) || (r.end_date||"").startsWith(prefix) ||
-           execs.some(e => e.work_log_id === r.id && (
-             (e.start_date||"").startsWith(prefix) || (e.end_date||"").startsWith(prefix)));
-  }).filter(r => _rptCatFilter.size === 0 || _rptCatFilter.has(r.category || ""));
+           execWorkIdsInMonth.has(r.id);
+  }).filter(r => _rptCatFilter.size === 0 || _rptCatFilter.has(r.category || "")), execMap);
 
-  const done    = filtered.filter(r=>r.status==="Дууссан").length;
+  const done    = filtered.filter(r=>["Хаагдсан","Дууссан"].includes(r.status)).length;
   const ongoing = filtered.filter(r=>r.status==="Явцтай").length;
   const waiting = filtered.length - done - ongoing;
-  const avgProg = filtered.length ? Math.round(filtered.reduce((a,r)=>a+(r.progress||0),0)/filtered.length) : 0;
+  const avgProg = filtered.length ? Math.round(filtered.reduce((a,r)=>a+(r._displayProgress||0),0)/filtered.length) : 0;
+  const chartHtml = rptPrintChart(filtered);
+  let cameraChartHtml = "";
+  let lightingChartHtml = "";
+  try {
+    const cameraData = await api(`/api/camera-analytics?year=${year}`);
+    cameraChartHtml = rptPrintCameraChart(cameraData, year, month);
+  } catch(e) {
+    cameraChartHtml = "";
+  }
+  try {
+    const lightingSnaps = await api(`/api/sl-daily-snapshots?year=${year}`);
+    lightingChartHtml = rptPrintLightingChart(lightingSnaps, year, month);
+  } catch(e) {
+    lightingChartHtml = "";
+  }
+  const availabilityChartsHtml = (cameraChartHtml || lightingChartHtml)
+    ? `<div class="availability-grid">${lightingChartHtml}${cameraChartHtml}</div>`
+    : "";
 
   // Зурагтай хэвлэх үед бүх гүйцэтгэлийн зургийг татна
   let photoMap = {};
@@ -430,46 +757,80 @@ async function printWorkReport(year, month, withImages = false) {
     results.forEach(({ id, photos }) => { photoMap[id] = photos; });
   }
 
-  const origin = location.origin;
-
-  const rows = filtered.map((r, i) => {
-    const wExecs = execs.filter(e => e.work_log_id === r.id);
+  let rowNo = 0;
+  const rows = rptGroupByCategory(filtered).map(group => {
+    const groupDone = group.items.filter(r => rptIsDoneStatus(r.status)).length;
+    const groupAvg = group.items.length
+      ? Math.round(group.items.reduce((s, r) => s + Number(r._displayProgress || 0), 0) / group.items.length)
+      : 0;
+    const body = group.items.map(r => {
+      rowNo++;
+      const wExecs = r._execs || [];
+      const workBadges = [
+        r._overdue ? `<span class="badge red">Хугацаа хэтэрсэн</span>` : "",
+        Number(r.material_count || 0) > 0 ? `<span class="badge blue">Материал ${r.material_count}</span>` : "",
+        Number(r.photo_count || 0) > 0 || wExecs.some(e => Number(e.photo_count || 0) > 0) ? `<span class="badge green">Зурагтай</span>` : "",
+        r.confirm_status === "confirmed" ? `<span class="badge green">Батлагдсан</span>` : "",
+      ].join("");
+      return `
+      <tr class="${r._overdue ? "overdue" : ""}">
+        <td style="text-align:center">${rowNo}</td>
+        <td><b>${escapeHtml(r.title||"")}</b><br><span class="muted">${escapeHtml(r.location||"")}</span><div>${workBadges}</div></td>
+        <td style="text-align:center;white-space:nowrap">${r.start_date||r.work_date||""}</td>
+        <td style="text-align:center;white-space:nowrap">${r.end_date||""}</td>
+        <td>${escapeHtml(r.material_note||"")}</td>
+        <td style="text-align:center;font-weight:700">${r._displayProgress||0}%</td>
+        <td style="text-align:center">${escapeHtml(r.status||"")}</td>
+        <td>${wExecs.map((ex,j)=>`<div class="exec"><b>Г${j+1}:</b> ${escapeHtml(ex.title||"")}
+          <span class="muted">(${ex.start_date||""} ~ ${ex.end_date||""}, ${ex.progress||0}%)</span>
+          ${ex.workers?`<br><small>Ажилчид: ${escapeHtml(ex.workers)}</small>`:""}
+          ${ex.note?`<br><small>Тайлбар: ${escapeHtml(ex.note)}</small>`:""}
+          ${withImages && photoMap[ex.id]?.length ? `<div class="photos">${photoMap[ex.id].slice(0,4).map(p=>`<img src="${escapeHtml(reportPhotoSrc(p))}">`).join("")}</div>` : ""}
+        </div>`).join("")||"—"}</td>
+      </tr>`;
+    }).join("");
     return `
-    <tr>
-      <td style="text-align:center">${i+1}</td>
-      <td><b>${escapeHtml(r.title||"")}</b><br><span style="font-size:10px;color:#666">${escapeHtml(r.location||"")}</span></td>
-      <td style="text-align:center;white-space:nowrap">${r.start_date||r.work_date||""}</td>
-      <td style="text-align:center;white-space:nowrap">${r.end_date||""}</td>
-      <td>${escapeHtml(r.material_note||"")}</td>
-      <td style="text-align:center;font-weight:700">${r.progress||0}%</td>
-      <td style="text-align:center">${escapeHtml(r.status||"")}</td>
-      <td>${wExecs.map((ex,j)=>`<div style="margin-bottom:5px"><b>Г${j+1}:</b> ${escapeHtml(ex.title||"")}
-        (${ex.start_date||""} ~ ${ex.end_date||""}, ${ex.progress||0}%)
-        ${ex.workers?`<br><small>👷 ${escapeHtml(ex.workers)}</small>`:""}
-        ${ex.note?`<br><small>📝 ${escapeHtml(ex.note)}</small>`:""}
-        ${withImages && photoMap[ex.id]?.length ? `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px">${photoMap[ex.id].map(p=>`<img src="${origin}${p.file_path}" style="width:130px;height:90px;object-fit:cover;border-radius:3px;border:1px solid #ccc;print-color-adjust:exact">`).join("")}</div>` : ""}
-      </div>`).join("")||"—"}</td>
-    </tr>`;
+      <tr class="cat-row">
+        <td colspan="8">${escapeHtml(group.category)} · ${group.items.length} ажил · Дууссан ${groupDone} · Дундаж явц ${groupAvg}%</td>
+      </tr>
+      ${body}`;
   }).join("");
 
   const html = `<!DOCTYPE html><html lang="mn"><head><meta charset="utf-8">
   <title>Ажлын явцын тайлан — ${MN_MONTHS[month]} ${year} он${_rptCatFilter.size ? " · " + [..._rptCatFilter].join(", ") : ""}${withImages ? " · Зурагтай" : ""}</title>
   <style>
-    body { font-family: 'Arial', sans-serif; font-size: 11pt; margin: 0; color: #000; }
-    .header { text-align: center; margin-bottom: 18px; border-bottom: 2px solid #000; padding-bottom: 10px; }
-    .header h2 { margin: 4px 0; font-size: 14pt; }
-    .header p  { margin: 2px 0; font-size: 10pt; color: #444; }
-    .summary { display: flex; gap: 20px; margin-bottom: 16px; }
-    .sum-box { border: 1px solid #ccc; border-radius: 6px; padding: 8px 16px; text-align: center; flex: 1; }
-    .sum-box b { font-size: 18pt; display: block; }
-    .sum-box span { font-size: 9pt; color: #666; }
-    table { width: 100%; border-collapse: collapse; font-size: 9.5pt; }
-    th { background: #1d4ed8; color: #fff; padding: 6px 8px; text-align: left; font-size: 9pt; }
-    td { padding: 5px 8px; border-bottom: 1px solid #e0e0e0; vertical-align: top; }
+    @page { size: A4 landscape; margin: 8mm; }
+    body { font-family: 'Arial', sans-serif; font-size: 9.5pt; margin: 0; color: #000; }
+    .header { text-align: center; margin-bottom: 8px; border-bottom: 2px solid #000; padding-bottom: 6px; }
+    .header h2 { margin: 2px 0; font-size: 13pt; }
+    .header p  { margin: 1px 0; font-size: 9pt; color: #444; }
+    .summary { display: flex; gap: 8px; margin-bottom: 8px; }
+    .sum-box { border: 1px solid #ccc; border-radius: 5px; padding: 5px 10px; text-align: center; flex: 1; }
+    .sum-box b { font-size: 14pt; display: block; }
+    .sum-box span { font-size: 8pt; color: #666; }
+    .chart-box { margin: 4px 0 5px; break-inside: avoid; page-break-inside: avoid; }
+    .chart-box svg { display:block; width:100%; max-height:39mm; }
+    .camera-chart svg, .lighting-chart svg { max-height:58mm; }
+    .availability-grid { display:flex; gap:7px; margin: -1px 0 6px; break-inside: avoid; page-break-inside: avoid; }
+    .availability-grid .chart-box { flex:1; margin:0; min-width:0; }
+    table { width: 100%; border-collapse: collapse; font-size: 8.5pt; }
+    th { background: #1d4ed8; color: #fff; padding: 4px 6px; text-align: left; font-size: 8pt; }
+    td { padding: 3px 5px; border-bottom: 1px solid #e0e0e0; vertical-align: top; }
     tr:nth-child(even) td { background: #f5f7ff; }
-    .footer { margin-top: 30px; display: flex; justify-content: space-between; }
-    .sign { text-align: center; border-top: 1px solid #000; padding-top: 6px; width: 200px; font-size: 10pt; }
-    @media print { body { margin: 10mm; } img { page-break-inside: avoid; max-width: 100%; } }
+    tr { break-inside: avoid; page-break-inside: avoid; }
+    .cat-row td { background:#dbeafe!important; color:#1e40af; font-weight:800; padding:5px 7px; border-top:2px solid #1d4ed8; }
+    .overdue td { background:#fff7ed!important; }
+    .muted { font-size:8pt;color:#666; }
+    .badge { display:inline-block;margin:2px 3px 0 0;padding:1px 5px;border-radius:10px;font-size:7.5pt;font-weight:700; }
+    .badge.red { background:#fee2e2;color:#dc2626; }
+    .badge.blue { background:#e0f2fe;color:#0284c7; }
+    .badge.green { background:#dcfce7;color:#16a34a; }
+    .exec { margin-bottom:3px;padding:3px 5px;border-left:2px solid #6366f1;background:#f8fafc;break-inside:avoid; }
+    .photos { display:grid;grid-template-columns:repeat(4,1fr);gap:3px;margin-top:3px;max-width:360px; }
+    .photos img { width:100%;height:58px;object-fit:cover;border:1px solid #ccc;border-radius:2px;print-color-adjust:exact; }
+    .footer { margin-top: 16px; display: flex; justify-content: space-between; }
+    .sign { text-align: center; border-top: 1px solid #000; padding-top: 5px; width: 180px; font-size: 9pt; }
+    @media print { img { page-break-inside: avoid; max-width: 100%; } }
   </style></head><body>
   <div class="header">
     <div style="font-size:11pt;margin-bottom:4px">ЧОЙБАЛСАН ХӨГЖИЛ ОНӨҮГ</div>
@@ -484,6 +845,8 @@ async function printWorkReport(year, month, withImages = false) {
     <div class="sum-box" style="border-color:#d97706"><b style="color:#d97706">${waiting}</b><span>Хүлээгдэж буй</span></div>
     <div class="sum-box" style="border-color:#2563eb"><b style="color:#2563eb">${avgProg}%</b><span>Дундаж явц</span></div>
   </div>
+  ${chartHtml}
+  ${availabilityChartsHtml}
   <table>
     <thead><tr>
       <th style="width:28px">#</th>
@@ -523,19 +886,377 @@ async function audit() {
   </div>`;
 }
 
+// ── Нэгтгэсэн сарын тайлан ───────────────────────────────────
+
+let _unifiedViewMode = 'live'; // 'live' | 'snap'
+
+async function reports_unified() {
+  const now = new Date();
+  const MN_MONTHS = ["","1-р сар","2-р сар","3-р сар","4-р сар","5-р сар",
+    "6-р сар","7-р сар","8-р сар","9-р сар","10-р сар","11-р сар","12-р сар"];
+  const role = state.me?.role || "";
+  const canFinance = ["director","accountant","chief_engineer"].includes(role);
+  const canHR      = ["director","hr","chief_engineer"].includes(role);
+  const canSave    = ["director","chief_engineer"].includes(role);
+
+  const savedY = document.getElementById("unifiedYear")?.value;
+  const savedM = document.getElementById("unifiedMonth")?.value;
+  const initYear  = savedY ? Number(savedY)  : now.getFullYear();
+  const initMonth = savedM ? Number(savedM)  : now.getMonth() + 1;
+
+  main.innerHTML = `<div style="text-align:center;padding:40px;color:#667085">⏳ Уншиж байна...</div>`;
+
+  let d, snapMeta = null;
+  try {
+    const [liveData, snapList] = await Promise.all([
+      api(`/api/monthly-report-unified?year=${initYear}&month=${initMonth}`),
+      api(`/api/unified-report-snapshots?year=${initYear}&month=${initMonth}`).catch(() => []),
+    ]);
+    const snap = Array.isArray(snapList) ? (snapList[0] || null) : null;
+    if (_unifiedViewMode === 'snap' && snap) {
+      const snapFull = await api(`/api/unified-report-snapshots/${initYear}/${initMonth}/data`).catch(() => null);
+      if (snapFull) { d = snapFull; snapMeta = snap; }
+      else { d = liveData; _unifiedViewMode = 'live'; }
+    } else {
+      d = liveData;
+      if (_unifiedViewMode === 'snap') _unifiedViewMode = 'live';
+    }
+    snapMeta = snap;
+  } catch(e) {
+    main.innerHTML = `<div style="padding:30px;color:#dc2626">Алдаа: ${escapeHtml(e.message)}</div>`;
+    return;
+  }
+
+  const fmt = n => Number(n||0).toLocaleString("mn-MN");
+  const kpi = (label, val, color, sub="") => `
+    <div style="background:#fff;border:1px solid #e2e6ed;border-radius:12px;padding:14px 16px;border-top:3px solid ${color}">
+      <div style="font-size:10px;color:#667085;margin-bottom:4px;text-transform:uppercase;letter-spacing:.4px">${label}</div>
+      <div style="font-size:22px;font-weight:900;color:${color}">${val}</div>
+      ${sub ? `<div style="font-size:10px;color:#94a3b8;margin-top:2px">${sub}</div>` : ""}
+    </div>`;
+
+  const workByCat = (d.work.by_category || []).map(c => `
+    <tr style="border-bottom:1px solid #f1f5f9">
+      <td style="padding:8px 12px;font-weight:700;font-size:12px">${escapeHtml(c.category||"—")}</td>
+      <td style="padding:8px 12px;text-align:center;font-weight:700;color:#2563eb">${c.total}</td>
+      <td style="padding:8px 12px;text-align:center;color:#16a34a">${c.closed}</td>
+      <td style="padding:8px 12px;text-align:center;color:#6366f1">${c.active}</td>
+      <td style="padding:8px 12px;text-align:center;color:#f59e0b">${c.hse_wait||0}</td>
+      <td style="padding:8px 12px;text-align:center;color:#8b5cf6">${c.pend_final||0}</td>
+      <td style="padding:8px 12px;text-align:center;color:#dc2626">${c.rejected}</td>
+      <td style="padding:8px 12px;text-align:center">
+        <span style="font-weight:700;color:${c.avg_progress>=80?'#16a34a':c.avg_progress>=50?'#d97706':'#dc2626'}">${c.avg_progress}%</span>
+      </td>
+    </tr>`).join("");
+
+  const matRows = (d.materials.by_work || []).slice(0,15).map(g => `
+    <tr style="border-bottom:1px solid #f1f5f9">
+      <td style="padding:8px 12px;font-weight:700;font-size:12px">${escapeHtml(g.label||"—")}</td>
+      <td style="padding:8px 12px;text-align:right;font-weight:700;color:#0ea5e9">${fmt(g.total)}₮</td>
+      <td style="padding:8px 12px;font-size:11px;color:#667085">
+        ${g.lines.map(l=>`${escapeHtml(l.name||"")} ${fmt(l.qty)} ${escapeHtml(l.unit||"")}`).join(", ")}
+      </td>
+    </tr>`).join("");
+
+  const hrRows = (d.hr.records || []).map(r => `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #f1f5f9">
+      <span style="font-size:12px">${escapeHtml(r.record_type||"—")}</span>
+      <span style="font-weight:800;color:#2563eb;font-size:14px">${r.count}</span>
+    </div>`).join("");
+
+  const isSnap = _unifiedViewMode === 'snap' && snapMeta;
+  const snapLabel = snapMeta
+    ? `💾 Хадгалсан · ${(snapMeta.updated_at||snapMeta.created_at||"").slice(0,10)} · ${escapeHtml(snapMeta.created_name||"")}`
+    : "💾 Хадгалсан байхгүй";
+
+  main.innerHTML = `
+  <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px">
+    <div>
+      <h1 style="margin:0 0 2px">📊 Нэгтгэсэн тайлан</h1>
+      <div style="font-size:12px;color:#667085">Unified Monthly Report · ${MN_MONTHS[initMonth]} ${initYear}</div>
+      ${isSnap ? `<div style="font-size:11px;color:#d97706;margin-top:3px;font-weight:700">📌 Хадгалсан хувилбар харж байна — ${(snapMeta.updated_at||"").slice(0,16)}</div>` : ""}
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <select id="unifiedYear" class="input" style="width:80px" onchange="reports_unified()">
+        ${[2024,2025,2026,2027].map(y=>`<option value="${y}" ${y===initYear?"selected":""}>${y}</option>`).join("")}
+      </select>
+      <select id="unifiedMonth" class="input" style="width:100px" onchange="reports_unified()">
+        ${MN_MONTHS.slice(1).map((m,i)=>`<option value="${i+1}" ${i+1===initMonth?"selected":""}>${m}</option>`).join("")}
+      </select>
+      <!-- Live / Snapshot toggle -->
+      <div style="display:flex;border:1.5px solid #e2e6ed;border-radius:8px;overflow:hidden">
+        <button onclick="_unifiedViewMode='live';reports_unified()"
+          style="padding:5px 12px;border:none;cursor:pointer;font-size:12px;font-weight:700;
+                 background:${!isSnap?'#2563eb':'#fff'};color:${!isSnap?'#fff':'#667085'}">
+          📊 Live
+        </button>
+        <button onclick="_unifiedViewMode='snap';reports_unified()"
+          title="${snapLabel}"
+          style="padding:5px 12px;border:none;border-left:1.5px solid #e2e6ed;cursor:pointer;font-size:12px;font-weight:700;
+                 background:${isSnap?'#d97706':'#fff'};color:${isSnap?'#fff':snapMeta?'#d97706':'#94a3b8'}">
+          💾 ${snapMeta ? (snapMeta.updated_at||"").slice(0,10) : "Хадгаагүй"}
+        </button>
+      </div>
+      ${canSave ? `<button class="btn" onclick="unifiedSaveSnapshot(${initYear},${initMonth})"
+        style="padding:6px 14px;background:#16a34a;border-color:#16a34a">💾 Хадгалах</button>` : ""}
+      <button class="btn" onclick="printUnifiedReport()" style="padding:6px 14px;background:#6366f1;border-color:#6366f1">🖨️ Хэвлэх</button>
+    </div>
+  </div>
+
+  <!-- KPI row -->
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:18px">
+    ${kpi("Нийт ажил",      d.work.total,         "#2563eb")}
+    ${kpi("Хаагдсан",       d.work.closed,        "#16a34a", `${d.work.avg_progress}% дундаж`)}
+    ${kpi("Явцтай",         d.work.active,        "#6366f1")}
+    ${kpi("ХАБЭА хүлээж",   d.work.hse_waiting,   "#f59e0b")}
+    ${kpi("Батламж хүлээж", d.work.pending_final, "#8b5cf6")}
+    ${kpi("Хугацаа хэтэрсэн", d.work.overdue,    "#dc2626")}
+    ${kpi("Нээлттэй эрсдэл", d.hse.open_risks,   "#f59e0b", `${d.hse.high_risks} өндөр`)}
+    ${kpi("Материал",       fmt(d.materials.total_amount)+"₮", "#0ea5e9")}
+    ${canFinance ? kpi("Орлого",  fmt(d.finance.income)+"₮",  "#10b981") : ""}
+    ${canFinance ? kpi("Зарлага", fmt(d.finance.expense)+"₮", "#f43f5e") : ""}
+    ${kpi("Нийт тээвэр", d.vehicles.total, "#8b5cf6", `${d.vehicles.in_repair} засварт`)}
+  </div>
+
+  <div style="display:grid;grid-template-columns:2fr 1fr;gap:16px;margin-bottom:16px">
+    <!-- Work by category -->
+    <div class="panel" style="padding:0;overflow:hidden">
+      <div style="padding:12px 16px;font-weight:800;font-size:13px;border-bottom:1px solid #f1f5f9">
+        🔧 Ажлын категориор
+      </div>
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead>
+          <tr style="background:#f8fafc">
+            <th style="padding:8px 12px;text-align:left;font-size:10px;color:#667085;font-weight:700">КАТЕГОРИ</th>
+            <th style="padding:8px 12px;text-align:center;font-size:10px;color:#667085;font-weight:700">НИЙТ</th>
+            <th style="padding:8px 12px;text-align:center;font-size:10px;color:#667085;font-weight:700">ХААГДСАН</th>
+            <th style="padding:8px 12px;text-align:center;font-size:10px;color:#667085;font-weight:700">ЯВЦТАЙ</th>
+            <th style="padding:8px 12px;text-align:center;font-size:10px;color:#f59e0b;font-weight:700">ХАБЭА ХҮЛЭЭЖ</th>
+            <th style="padding:8px 12px;text-align:center;font-size:10px;color:#8b5cf6;font-weight:700">БАТЛАМЖ ХҮЛЭЭЖ</th>
+            <th style="padding:8px 12px;text-align:center;font-size:10px;color:#667085;font-weight:700">БУЦААСАН</th>
+            <th style="padding:8px 12px;text-align:center;font-size:10px;color:#667085;font-weight:700">ДУН%</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${workByCat || `<tr><td colspan="8" style="padding:20px;text-align:center;color:#94a3b8">Мэдээлэл байхгүй</td></tr>`}
+        </tbody>
+      </table>
+    </div>
+
+    <!-- HSE + HR sidebar -->
+    <div style="display:flex;flex-direction:column;gap:14px">
+      <div class="panel" style="padding:14px">
+        <div style="font-weight:800;font-size:13px;margin-bottom:10px">🦺 ХАБЭА</div>
+        <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #f1f5f9">
+          <span style="font-size:12px;color:#667085">Нээлттэй эрсдэл</span>
+          <span style="font-weight:700;color:#f59e0b">${d.hse.open_risks}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #f1f5f9">
+          <span style="font-size:12px;color:#667085">Өндөр эрсдэл</span>
+          <span style="font-weight:700;color:#dc2626">${d.hse.high_risks}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;padding:6px 0">
+          <span style="font-size:12px;color:#667085">Шинэ эрсдэл</span>
+          <span style="font-weight:700;color:#2563eb">${d.hse.new_risks}</span>
+        </div>
+        ${d.hse.snapshot ? `
+        <div style="margin-top:10px;padding:8px;background:#f0fdf4;border-radius:8px;border:1px solid #bbf7d0;font-size:11px">
+          ✅ <b>${escapeHtml(d.hse.snapshot.title||"ХАБЭА хадгалсан")}</b>
+          <div style="color:#667085;margin-top:2px">${(d.hse.snapshot.saved_at||"").slice(0,10)}</div>
+        </div>` : ""}
+      </div>
+
+      ${canHR ? `<div class="panel" style="padding:14px">
+        <div style="font-weight:800;font-size:13px;margin-bottom:8px">👥 HR (${d.hr.total} бүртгэл)</div>
+        ${hrRows || `<div style="color:#94a3b8;font-size:12px">Мэдээлэл байхгүй</div>`}
+      </div>` : ""}
+    </div>
+  </div>
+
+  <!-- Materials -->
+  ${d.materials.total_amount > 0 ? `
+  <div class="panel" style="padding:0;overflow:hidden;margin-bottom:16px">
+    <div style="padding:12px 16px;font-weight:800;font-size:13px;border-bottom:1px solid #f1f5f9;display:flex;justify-content:space-between;align-items:center">
+      <span>📦 Материал зарцуулалт</span>
+      <span style="font-size:14px;font-weight:900;color:#0ea5e9">${fmt(d.materials.total_amount)}₮</span>
+    </div>
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead>
+        <tr style="background:#f8fafc">
+          <th style="padding:8px 12px;text-align:left;font-size:10px;color:#667085;font-weight:700">АЖИЛ</th>
+          <th style="padding:8px 12px;text-align:right;font-size:10px;color:#667085;font-weight:700">ДҮН</th>
+          <th style="padding:8px 12px;text-align:left;font-size:10px;color:#667085;font-weight:700">МАТЕРИАЛУУД</th>
+        </tr>
+      </thead>
+      <tbody>${matRows}</tbody>
+    </table>
+  </div>` : ""}
+
+  <!-- Finance -->
+  ${canFinance ? `
+  <div class="panel" style="padding:14px;margin-bottom:16px">
+    <div style="font-weight:800;font-size:13px;margin-bottom:12px">💰 Санхүү</div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px">
+      <div style="text-align:center;padding:12px;background:#f0fdf4;border-radius:10px;border:1px solid #bbf7d0">
+        <div style="font-size:10px;color:#667085;margin-bottom:4px">ОРЛОГО</div>
+        <div style="font-size:18px;font-weight:900;color:#10b981">${fmt(d.finance.income)}₮</div>
+      </div>
+      <div style="text-align:center;padding:12px;background:#fff1f2;border-radius:10px;border:1px solid #fecdd3">
+        <div style="font-size:10px;color:#667085;margin-bottom:4px">ЗАРЛАГА</div>
+        <div style="font-size:18px;font-weight:900;color:#f43f5e">${fmt(d.finance.expense)}₮</div>
+      </div>
+      <div style="text-align:center;padding:12px;background:#eff6ff;border-radius:10px;border:1px solid #bfdbfe">
+        <div style="font-size:10px;color:#667085;margin-bottom:4px">ҮЙЛЧИЛГЭЭНИЙ ЗАРДАЛ</div>
+        <div style="font-size:18px;font-weight:900;color:#2563eb">${fmt(d.finance.op_expenses)}₮</div>
+      </div>
+    </div>
+  </div>` : ""}`;
+
+  window._unifiedData = { d, initYear, initMonth, MN_MONTHS };
+}
+
+async function printUnifiedReport() {
+  const ud = window._unifiedData;
+  if (!ud) { toast("Эхлээд тайлан ачаална уу"); return; }
+  const { d, initYear, initMonth, MN_MONTHS } = ud;
+  const fmt = n => Number(n||0).toLocaleString("mn-MN");
+  const role = state.me?.role || "";
+  const canFinance = ["director","accountant","chief_engineer"].includes(role);
+
+  const catRows = (d.work.by_category || []).map((c,i) => `
+    <tr>
+      <td>${i+1}</td><td>${c.category||"—"}</td>
+      <td style="text-align:center">${c.total}</td>
+      <td style="text-align:center">${c.closed}</td>
+      <td style="text-align:center">${c.active}</td>
+      <td style="text-align:center">${c.hse_wait||0}</td>
+      <td style="text-align:center">${c.pend_final||0}</td>
+      <td style="text-align:center">${c.rejected}</td>
+      <td style="text-align:center">${c.avg_progress}%</td>
+    </tr>`).join("");
+
+  const matRows = (d.materials.by_work || []).map((g,i) => `
+    <tr>
+      <td>${i+1}</td><td>${g.label||"—"}</td>
+      <td style="text-align:right">${fmt(g.total)}₮</td>
+      <td>${g.lines.map(l=>`${l.name||""} ${fmt(l.qty)} ${l.unit||""}`).join("; ")}</td>
+    </tr>`).join("");
+
+  const html = `<!DOCTYPE html><html lang="mn"><head><meta charset="utf-8">
+  <title>Нэгтгэсэн тайлан — ${MN_MONTHS[initMonth]} ${initYear}</title>
+  <style>
+    body { font-family: Arial, sans-serif; font-size: 10.5pt; margin: 0; color: #000; }
+    .header { text-align: center; margin-bottom: 18px; border-bottom: 2px solid #000; padding-bottom: 10px; }
+    h2 { margin: 4px 0; font-size: 13pt; }
+    h3 { margin: 14px 0 6px; font-size: 11pt; border-bottom: 1px solid #ccc; padding-bottom: 3px; }
+    table { width: 100%; border-collapse: collapse; font-size: 9.5pt; margin-bottom: 14px; }
+    th { background: #1d4ed8; color: #fff; padding: 5px 7px; text-align: left; font-size: 9pt; }
+    td { padding: 4px 7px; border-bottom: 1px solid #e0e0e0; vertical-align: top; }
+    tr:nth-child(even) td { background: #f5f7ff; }
+    .kpi-row { display: flex; gap: 12px; margin-bottom: 14px; }
+    .kpi { border: 1px solid #ccc; border-radius: 6px; padding: 7px 12px; flex: 1; text-align: center; }
+    .kpi b { font-size: 15pt; display: block; }
+    .kpi span { font-size: 8.5pt; color: #555; }
+    .footer { margin-top: 30px; display: flex; justify-content: space-between; }
+    .sign { text-align: center; border-top: 1px solid #000; padding-top: 6px; width: 180px; font-size: 9.5pt; }
+    @media print { body { margin: 8mm; } }
+  </style></head><body>
+  <div class="header">
+    <div style="font-size:10pt;margin-bottom:4px">ЧОЙБАЛСАН ХӨГЖИЛ ОНӨҮГ</div>
+    <h2>НЭГТГЭСЭН ТАЙЛАН — ${MN_MONTHS[initMonth].toUpperCase()} ${initYear} ОН</h2>
+    <p style="font-size:9pt;color:#444">Тайлан гарсан огноо: ${new Date().toLocaleDateString("mn-MN")}</p>
+  </div>
+
+  <div class="kpi-row">
+    <div class="kpi"><b>${d.work.total}</b><span>Нийт ажил</span></div>
+    <div class="kpi"><b style="color:#16a34a">${d.work.closed}</b><span>Хаагдсан</span></div>
+    <div class="kpi"><b style="color:#6366f1">${d.work.active}</b><span>Явцтай</span></div>
+    <div class="kpi"><b style="color:#dc2626">${d.work.overdue}</b><span>Хугацаа хэтэрсэн</span></div>
+    <div class="kpi"><b>${d.work.avg_progress}%</b><span>Дундаж явц</span></div>
+  </div>
+
+  <h3>1. Ажлын категориор</h3>
+  <table>
+    <thead><tr><th>#</th><th>Категори</th><th>Нийт</th><th>Хаагдсан</th><th>Явцтай</th><th>ХАБЭА хүл.</th><th>Батламж хүл.</th><th>Буцаасан</th><th>Дундаж%</th></tr></thead>
+    <tbody>${catRows||`<tr><td colspan="9" style="text-align:center">Мэдээлэл байхгүй</td></tr>`}</tbody>
+  </table>
+
+  <h3>2. ХАБЭА</h3>
+  <div class="kpi-row">
+    <div class="kpi"><b style="color:#f59e0b">${d.hse.open_risks}</b><span>Нээлттэй эрсдэл</span></div>
+    <div class="kpi"><b style="color:#dc2626">${d.hse.high_risks}</b><span>Өндөр эрсдэл</span></div>
+    <div class="kpi"><b style="color:#2563eb">${d.hse.new_risks}</b><span>Шинэ эрсдэл</span></div>
+  </div>
+
+  ${d.materials.total_amount > 0 ? `
+  <h3>3. Материал зарцуулалт — Нийт: ${fmt(d.materials.total_amount)}₮</h3>
+  <table>
+    <thead><tr><th>#</th><th>Ажил</th><th>Дүн</th><th>Материал</th></tr></thead>
+    <tbody>${matRows}</tbody>
+  </table>` : ""}
+
+  ${canFinance ? `
+  <h3>4. Санхүү</h3>
+  <div class="kpi-row">
+    <div class="kpi"><b style="color:#10b981">${fmt(d.finance.income)}₮</b><span>Орлого</span></div>
+    <div class="kpi"><b style="color:#f43f5e">${fmt(d.finance.expense)}₮</b><span>Зарлага</span></div>
+    <div class="kpi"><b style="color:#2563eb">${fmt(d.finance.op_expenses)}₮</b><span>Үйл. зардал</span></div>
+  </div>` : ""}
+
+  <div class="footer">
+    <div class="sign">Тайлан гаргасан:<br><br>.....................<br>${new Date().toLocaleDateString("mn-MN")}</div>
+    <div class="sign">Ахлах инженер:<br><br>.....................<br></div>
+    <div class="sign">Захирал:<br><br>.....................<br></div>
+  </div>
+  <script>window.onload=()=>window.print();<\/script>
+  </body></html>`;
+
+  const w = window.open("", "_blank");
+  if (w) {
+    const restoreControls = () => {
+      document.getElementById("rptYear")?.removeAttribute("disabled");
+      document.getElementById("rptMonth")?.removeAttribute("disabled");
+      window.focus();
+    };
+    w.document.write(html);
+    w.document.close();
+    const poll = setInterval(() => {
+      if (w.closed) {
+        clearInterval(poll);
+        restoreControls();
+      }
+    }, 500);
+    setTimeout(restoreControls, 1200);
+  }
+  else toast("Popup блоклогдсон байна.");
+}
+
 function rptToggleCat(name) {
-  if (_rptCatFilter.has(name)) {
-    _rptCatFilter.delete(name);
+  if (_rptCatFilter.size === 1 && _rptCatFilter.has(name)) {
+    _rptCatFilter.clear();
   } else {
+    _rptCatFilter.clear();
     _rptCatFilter.add(name);
   }
-  if (_rptCatFilter.size === _workCats.length) _rptCatFilter.clear();
-  reports();
+  reloadReports();
 }
 
 function rptToggleAll() {
   _rptCatFilter.clear();
-  reports();
+  reloadReports();
 }
 
-Object.assign(window, { reports, audit, report_schedule, printWorkReport, reloadReports, _rptVals, rptToggleCat, rptToggleAll });
+async function unifiedSaveSnapshot(year, month) {
+  if (!confirm(`${year} оны ${month}-р сарын нэгтгэсэн тайланг одоогийн дүнгээр хадгалах уу?\n(Байгаа бол дарж бичнэ)`)) return;
+  try {
+    const res = await api("/api/unified-report-snapshots", {
+      method: "POST",
+      body: JSON.stringify({ year, month }),
+    });
+    toast(`✅ ${res.title} — хадгалагдлаа`);
+    _unifiedViewMode = 'snap';
+    reports_unified();
+  } catch(e) { toast("Алдаа: " + e.message); }
+}
+
+Object.assign(window, { reports, audit, report_schedule, reports_unified, printWorkReport, printUnifiedReport, reloadReports, _rptVals, rptToggleCat, rptToggleAll, unifiedSaveSnapshot, _unifiedViewMode });

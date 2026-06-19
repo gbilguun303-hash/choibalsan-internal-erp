@@ -25,29 +25,61 @@ function detectType(rows) {
 
 function parseCashJournal(rows) {
   const data = [];
-  for (let i = 2; i < rows.length; i++) {
+  const norm = v => String(v || "").toLowerCase().replace(/\s+/g, "").replace(/[₮№"']/g, "");
+  const num = v => {
+    if (typeof v === "number") return v;
+    const cleaned = String(v || "").replace(/,/g, "").trim();
+    return Number(cleaned || 0);
+  };
+  const headerIdx = rows.findIndex(r => {
+    const names = (r || []).map(norm);
+    return names.includes("огноо") && names.includes("регистер") && names.includes("байгууллага") &&
+      names.some(h => h.includes("орлого")) && names.some(h => h.includes("зарлага"));
+  });
+  const header = headerIdx >= 0 ? rows[headerIdx] : [];
+  const col = (aliases, fallback) => {
+    const found = header.findIndex(h => aliases.some(a => norm(h).includes(norm(a))));
+    return found >= 0 ? found : fallback;
+  };
+  const c = {
+    date: col(["Огноо"], 0),
+    register: col(["Регистер"], 1),
+    counterparty: col(["Байгууллага"], 2),
+    income: col(["Орлого"], 3),
+    expense: col(["Зарлага"], 4),
+    balance: col(["Үлдэгдэл"], 5),
+    rate: col(["Ханш"], 6),
+    currency: col(["Валют"], 7),
+    desc: col(["Гүйлгээний утга"], 8),
+    corr: col(["Харьцсан данс"], 9),
+    cashFlow: col(["Мөнгөн гүйлгээ тайлан"], 10),
+  };
+
+  for (let i = Math.max(headerIdx + 1, 2); i < rows.length; i++) {
     const r = rows[i];
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(r[0]||"").trim())) continue;
-    const orlogo  = Number(r[5] || 0);
-    const zarlaga = Number(r[6] || 0);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(r[c.date]||"").trim())) continue;
+    const orlogo  = num(r[c.income]);
+    const zarlaga = num(r[c.expense]);
     if (orlogo === 0 && zarlaga === 0) continue;
-    // Columns L-O (indices 10-13) are hidden in Excel → skip to P (index 14)
     data.push({
-      txn_date:     String(r[0]).trim(),
-      doc_no:       String(r[1] || ""),
-      register:     String(r[3] || ""),
-      counterparty: String(r[4] || ""),
+      txn_date:     String(r[c.date]).trim(),
+      doc_no:       "",
+      register:     String(r[c.register] || ""),
+      counterparty: String(r[c.counterparty] || ""),
       txn_type:     (zarlaga > 0 && orlogo === 0) ? "Зарлага" : "Орлого",
       amount:       (zarlaga > 0 && orlogo === 0) ? zarlaga : orlogo,
-      txn_desc:     String(r[14] || ""),
-      corr_account: String(r[15] || ""),
-      cash_flow:    String(r[16] || ""),
-      excess:       String(r[17] || ""),
-      purpose:      String(r[18] || ""),
-      source:       String(r[19] || ""),
-      econ_cat:     String(r[20] || ""),
-      transferor:   String(r[21] || ""),
-      receiver:     String(r[22] || ""),
+      balance:      num(r[c.balance]),
+      exchange_rate:num(r[c.rate]) || 1,
+      currency:     String(r[c.currency] || "MNT"),
+      txn_desc:     String(r[c.desc] || ""),
+      corr_account: String(r[c.corr] || ""),
+      cash_flow:    String(r[c.cashFlow] || ""),
+      excess:       "",
+      purpose:      "",
+      source:       "",
+      econ_cat:     "",
+      transferor:   "",
+      receiver:     "",
     });
   }
   return data;
@@ -199,6 +231,11 @@ router.post("/smart-import/parse", auth, upload.single("file"), async (req, res)
 router.post("/smart-import/commit", auth, requirePermission("smart_import"), async (req, res) => {
   const { type, data } = req.body;
   if (!data || !type) return res.status(400).json({ error: "Мэдээлэл дутуу" });
+  const targetYear = Number(req.body.target_year || new Date().getFullYear());
+  const targetMonth = Number(req.body.target_month || (new Date().getMonth() + 1));
+  const targetDate = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body.target_date || ""))
+    ? String(req.body.target_date)
+    : `${targetYear}-${String(targetMonth).padStart(2, "0")}-01`;
 
   let inserted = 0, skipped = 0, errors = [];
 
@@ -208,14 +245,15 @@ router.post("/smart-import/commit", auth, requirePermission("smart_import"), asy
         await run(
           `INSERT INTO cash_journal(txn_date,doc_no,txn_type,description,counterparty,register_no,
              corr_account,cash_flow_type,excess,purpose,source_fund,econ_category,transferor,receiver,
-             amount,created_by)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+             amount,currency,exchange_rate,imported_balance,created_by)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
           [r.txn_date, r.doc_no||"", r.txn_type,
            r.txn_desc||r.counterparty||"", r.counterparty||"", r.register||"",
            r.corr_account||"", r.cash_flow||"", r.excess||"",
            r.purpose||"", r.source||"", r.econ_cat||"",
            r.transferor||"", r.receiver||"",
-           Number(r.amount||0), req.user.id]);
+           Number(r.amount||0), r.currency||"MNT", Number(r.exchange_rate||1),
+           r.balance === "" || r.balance === undefined ? null : Number(r.balance||0), req.user.id]);
         inserted++;
       } catch(e) { errors.push(e.message); }
     }
@@ -295,8 +333,8 @@ router.post("/smart-import/commit", auth, requirePermission("smart_import"), asy
         await run(
           `INSERT INTO accounts_receivable
              (debtor_name,invoice_date,amount,status,description,created_by)
-           VALUES(?,date('now'),?,?,?,?)`,
-          [r.name, Number(r.final_balance||0), "Хүлээгдэж буй",
+           VALUES(?,?,?,?,?,?)`,
+          [r.name, targetDate, Number(r.final_balance||0), "Хүлээгдэж буй",
            [r.register_no, r.city].filter(Boolean).join(" · "), req.user.id]);
         inserted++;
       } catch(e) { errors.push(e.message); }
@@ -310,8 +348,8 @@ router.post("/smart-import/commit", auth, requirePermission("smart_import"), asy
         await run(
           `INSERT INTO accounts_payable
              (vendor_name,invoice_date,amount,status,description,created_by)
-           VALUES(?,date('now'),?,?,?,?)`,
-          [r.name, Number(r.final_balance||0), "Төлөгдөөгүй",
+           VALUES(?,?,?,?,?,?)`,
+          [r.name, targetDate, Number(r.final_balance||0), "Төлөгдөөгүй",
            [r.register_no, r.city].filter(Boolean).join(" · "), req.user.id]);
         inserted++;
       } catch(e) { errors.push(e.message); }

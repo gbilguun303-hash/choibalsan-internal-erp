@@ -3,6 +3,12 @@ const { run, all, get, auth, audit, upload } = require("../db");
 const { requireRole, requirePermission } = require("../middleware/roles");
 const XLSX    = require("xlsx");
 const router  = express.Router();
+const {
+  LIGHTING_CATEGORIES,
+  lightingCategoryTotals,
+  saveLightingDailySnapshot,
+  listLightingDailySnapshots,
+} = require("../services/lighting_snapshots");
 
 // ── Organizations ─────────────────────────────────────────────
 router.get("/sl-orgs", auth, async (req, res) => {
@@ -55,11 +61,12 @@ router.post("/sl-points", auth, requirePermission("sl_billing"), async (req, res
     const b = req.body;
     const r = await run(
       `INSERT INTO sl_points(code,name,location,gps_lat,gps_lng,org_id,meter_no,
-       lamp_count,wattage_per_lamp,status,install_date,notes,created_by)
-       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       lamp_count,wattage_per_lamp,head_count,total_heads,light_type,needs_poles,status,install_date,notes,asset_id,created_by)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [b.code, b.name, b.location||null, b.gps_lat||null, b.gps_lng||null,
        b.org_id||null, b.meter_no||null, b.lamp_count||1, b.wattage_per_lamp||0,
-       b.status||"active", b.install_date||null, b.notes||null, req.user.id]
+       b.head_count||1, b.total_heads||0, b.light_type||null, b.needs_poles||0,
+       b.status||"active", b.install_date||null, b.notes||null, b.asset_id||null, req.user.id]
     );
     await audit(req.user.id, "CREATE", "sl_points", r.id, `${b.code}: ${b.name}`);
     res.json({ id: r.id });
@@ -71,11 +78,12 @@ router.put("/sl-points/:id", auth, requirePermission("sl_billing"), async (req, 
     const b = req.body;
     await run(
       `UPDATE sl_points SET code=?,name=?,location=?,gps_lat=?,gps_lng=?,org_id=?,
-       meter_no=?,lamp_count=?,wattage_per_lamp=?,status=?,install_date=?,remove_date=?,
-       notes=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+       meter_no=?,lamp_count=?,wattage_per_lamp=?,head_count=?,total_heads=?,light_type=?,needs_poles=?,status=?,install_date=?,remove_date=?,
+       notes=?,asset_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`,
       [b.code, b.name, b.location||null, b.gps_lat||null, b.gps_lng||null, b.org_id||null,
-       b.meter_no||null, b.lamp_count||1, b.wattage_per_lamp||0, b.status,
-       b.install_date||null, b.remove_date||null, b.notes||null, req.params.id]
+       b.meter_no||null, b.lamp_count||1, b.wattage_per_lamp||0,
+       b.head_count||1, b.total_heads||0, b.light_type||null, b.needs_poles||0, b.status,
+       b.install_date||null, b.remove_date||null, b.notes||null, b.asset_id||null, req.params.id]
     );
     await audit(req.user.id, "UPDATE", "sl_points", req.params.id, `${b.code}: ${b.name}`);
     res.json({ ok: true });
@@ -686,6 +694,7 @@ router.get("/sl-import/template/readings", auth, async (req, res) => {
 // ── Summary stats for dashboard ──────────────────────────────
 router.get("/sl-ger-stats", auth, async (_req, res) => {
   try {
+    await saveLightingDailySnapshot(null, "stats_view").catch(() => {});
     const rows = await all("SELECT category, SUM(total_count) as total FROM sl_ger_inventory GROUP BY category");
     const byBag = await all(
       `SELECT bag_no, category, SUM(total_count) as total
@@ -750,19 +759,14 @@ router.get("/sl-ger-stats", auth, async (_req, res) => {
 // ── Lighting fault / availability analytics ───────────────────
 router.get("/sl-analytics", auth, async (req, res) => {
   try {
+    await saveLightingDailySnapshot(null, "analytics_view").catch(() => {});
     const year = String(req.query.year || new Date().getFullYear()).replace(/[^\d]/g, "").slice(0, 4) || String(new Date().getFullYear());
     const start = `${year}-01-01`;
     const end = `${Number(year) + 1}-01-01`;
-    const cats = ["Авто замын гэрэл", "Гэр хорооллын гэрэл", "Цамхагийн гэрэл", "Гэрлэн дохио"];
+    const cats = LIGHTING_CATEGORIES;
 
-    const [road, ger, tower, signal, reported, repaired, reportedToDate, repairedToDate, openNow] = await Promise.all([
-      get(`SELECT COALESCE(SUM(CASE WHEN total_heads > 0 THEN total_heads ELSE lamp_count END),0) total
-           FROM sl_points WHERE code LIKE 'ГТ-%'`),
-      get(`SELECT COALESCE(SUM(CASE WHEN head_count > 0 THEN head_count ELSE total_count END),0) total
-           FROM sl_ger_inventory WHERE category='Гэр хороолол'`),
-      get(`SELECT COALESCE(SUM(CASE WHEN head_count > 0 THEN head_count ELSE total_count END),0) total
-           FROM sl_ger_inventory WHERE category='Цамхаг'`),
-      get(`SELECT COUNT(*) total FROM assets WHERE category='Гэрлэн дохио'`),
+    const [totals, reported, repaired, reportedToDate, repairedToDate, openNow, snapshots] = await Promise.all([
+      lightingCategoryTotals(),
       all(`SELECT category, substr(report_date,1,7) ym,
                   SUM(broken_count + fixed_count) reported_heads,
                   COUNT(*) fault_count
@@ -787,18 +791,13 @@ router.get("/sl-analytics", auth, async (req, res) => {
            JOIN sl_faults f ON f.id=r.fault_id
            WHERE r.repair_date<?
            GROUP BY f.category, substr(r.repair_date,1,7)`, [end]),
-      all(`SELECT category, SUM(broken_count) open_heads, COUNT(*) open_faults
-           FROM sl_faults
-           WHERE status!='Дууссан'
-           GROUP BY category`)
+       all(`SELECT category, SUM(broken_count) open_heads, COUNT(*) open_faults
+            FROM sl_faults
+            WHERE status!='Дууссан'
+            GROUP BY category`),
+      listLightingDailySnapshots({ year })
     ]);
 
-    const totals = {
-      "Авто замын гэрэл": Number(road?.total || 0),
-      "Гэр хорооллын гэрэл": Number(ger?.total || 0),
-      "Цамхагийн гэрэл": Number(tower?.total || 0),
-      "Гэрлэн дохио": Number(signal?.total || 0),
-    };
     const byKey = rows => {
       const map = {};
       rows.forEach(r => { map[`${r.category}|${r.ym}`] = r; });
@@ -808,6 +807,21 @@ router.get("/sl-analytics", auth, async (req, res) => {
     const fixMap = byKey(repaired);
     const openMap = {};
     openNow.forEach(r => { openMap[r.category] = r; });
+    const snapshotByMonth = {};
+    // Also track the latest snapshot per category (for asset-tracked categories like Гэрлэн дохио)
+    const latestSnapByCategory = {};
+    snapshots.forEach(s => {
+      const ym = String(s.snapshot_date || "").slice(0, 7);
+      if (!snapshotByMonth[ym]) snapshotByMonth[ym] = {};
+      const prev = snapshotByMonth[ym][s.category];
+      if (!prev || String(s.snapshot_date) > String(prev.snapshot_date)) snapshotByMonth[ym][s.category] = s;
+      if (!latestSnapByCategory[s.category] || String(s.snapshot_date) > String(latestSnapByCategory[s.category].snapshot_date)) {
+        latestSnapByCategory[s.category] = s;
+      }
+    });
+
+    // Categories tracked via assets.status rather than sl_faults — carry forward their latest snapshot
+    const ASSET_TRACKED = new Set(["Гэрлэн дохио"]);
 
     const months = Array.from({ length: 12 }, (_, i) => {
       const ym = `${year}-${String(i + 1).padStart(2, "0")}`;
@@ -821,8 +835,10 @@ router.get("/sl-analytics", auth, async (req, res) => {
         const cumulativeRepaired = repairedToDate
           .filter(x => x.category === category && x.ym <= ym)
           .reduce((s, x) => s + Number(x.repaired_heads || 0), 0);
-        const catOpen = Math.max(0, cumulativeReported - cumulativeRepaired);
-        const catCapacity = totals[category] || 0;
+        // For asset-tracked categories, fall back to the latest known snapshot when no monthly snapshot exists
+        const snap = snapshotByMonth[ym]?.[category] || (ASSET_TRACKED.has(category) ? (latestSnapByCategory[category] || null) : null);
+        const catOpen = snap ? Number(snap.broken_count || 0) : Math.max(0, cumulativeReported - cumulativeRepaired);
+        const catCapacity = snap ? Number(snap.total_count || 0) : (totals[category] || 0);
         const catAvailability = catCapacity > 0 ? Math.max(0, (catCapacity - catOpen) / catCapacity * 100) : null;
 
         reportedHeads += Number(r.reported_heads || 0);
@@ -840,7 +856,8 @@ router.get("/sl-analytics", auth, async (req, res) => {
           repair_count: Number(f.repair_count || 0),
           repaired_heads: Number(f.repaired_heads || 0),
           open_heads: catOpen,
-          availability_pct: catAvailability
+          availability_pct: snap ? Number(snap.availability_pct) : catAvailability,
+          snapshot_date: snap?.snapshot_date || null
         };
       });
       return {
@@ -853,6 +870,7 @@ router.get("/sl-analytics", auth, async (req, res) => {
         repaired_heads: repairedHeads,
         open_heads: openHeads,
         availability_pct: capacity > 0 ? Math.max(0, (capacity - openHeads) / capacity * 100) : null,
+        snapshot_count: categories.filter(c => c.snapshot_date).length,
         categories
       };
     });
@@ -860,20 +878,25 @@ router.get("/sl-analytics", auth, async (req, res) => {
     const by_category = cats.map(category => {
       const catReported = reported.filter(r => r.category === category);
       const catRepaired = repaired.filter(r => r.category === category);
-      const reportedHeads = catReported.reduce((s, r) => s + Number(r.reported_heads || 0), 0);
+      const catSnapshots = snapshots.filter(s => s.category === category);
+      const lastSnap = catSnapshots[catSnapshots.length - 1] || null;
+      const reportedHeadsRaw = catReported.reduce((s, r) => s + Number(r.reported_heads || 0), 0);
       const repairedHeads = catRepaired.reduce((s, r) => s + Number(r.repaired_heads || 0), 0);
-      const openHeads = Number(openMap[category]?.open_heads || 0);
-      const capacity = totals[category] || 0;
+      const openHeads = lastSnap ? Number(lastSnap.broken_count || 0) : Number(openMap[category]?.open_heads || 0);
+      const capacity = lastSnap ? Number(lastSnap.total_count || 0) : (totals[category] || 0);
+      // Гэрлэн дохио is tracked via assets.status, not sl_faults — use openHeads as reported
+      const reportedHeads = (category === "Гэрлэн дохио" && reportedHeadsRaw === 0) ? openHeads : reportedHeadsRaw;
       return {
         category,
         capacity,
-        fault_count: catReported.reduce((s, r) => s + Number(r.fault_count || 0), 0),
+        fault_count: catReported.reduce((s, r) => s + Number(r.fault_count || 0), 0) || (category === "Гэрлэн дохио" ? openHeads : 0),
         reported_heads: reportedHeads,
         repair_count: catRepaired.reduce((s, r) => s + Number(r.repair_count || 0), 0),
         repaired_heads: repairedHeads,
         open_heads: openHeads,
         open_faults: Number(openMap[category]?.open_faults || 0),
-        availability_pct: capacity > 0 ? Math.max(0, (capacity - openHeads) / capacity * 100) : null
+        availability_pct: lastSnap ? Number(lastSnap.availability_pct) : (capacity > 0 ? Math.max(0, (capacity - openHeads) / capacity * 100) : null),
+        snapshot_date: lastSnap?.snapshot_date || null
       };
     });
 
@@ -890,8 +913,19 @@ router.get("/sl-analytics", auth, async (req, res) => {
         availability_pct: totalCapacity > 0 ? Math.max(0, (totalCapacity - totalOpen) / totalCapacity * 100) : null
       },
       by_category,
-      months
+      months,
+      snapshots
     });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get("/sl-daily-snapshots", auth, async (req, res) => {
+  try {
+    await saveLightingDailySnapshot(null, "snapshot_view").catch(() => {});
+    res.json(await listLightingDailySnapshots({
+      year: req.query.year || new Date().getFullYear(),
+      category: req.query.category || "",
+    }));
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -923,11 +957,11 @@ router.post("/sl-ger-inventory", auth, requirePermission("sl_ger_write"), async 
   if (!b.category)              return res.status(400).json({ error: "Төрөл шаардлагатай" });
   try {
     const r = await run(
-      `INSERT INTO sl_ger_inventory(bag_no,location_name,category,total_count,head_count,light_type,sl_point_id,notes,created_by)
-       VALUES(?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO sl_ger_inventory(bag_no,location_name,category,total_count,head_count,needs_poles,light_type,sl_point_id,notes,asset_id,created_by)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
       [b.bag_no||null, b.location_name.trim(), b.category,
-       Number(b.total_count||0), Number(b.head_count||0),
-       b.light_type||"", b.sl_point_id||null, b.notes||"", req.user.id]
+       Number(b.total_count||0), Number(b.head_count||0), Number(b.needs_poles||0),
+       b.light_type||"", b.sl_point_id||null, b.notes||"", b.asset_id||null, req.user.id]
     );
     await audit(req.user.id, "CREATE", "sl_ger_inventory", r.id, b.location_name.trim());
     res.json({ id: r.id });
@@ -941,10 +975,10 @@ router.put("/sl-ger-inventory/:id", auth, requirePermission("sl_ger_write"), asy
   try {
     await run(
       `UPDATE sl_ger_inventory SET bag_no=?,location_name=?,category=?,total_count=?,head_count=?,
-       light_type=?,sl_point_id=?,notes=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+       needs_poles=?,light_type=?,sl_point_id=?,notes=?,asset_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`,
       [b.bag_no||null, b.location_name.trim(), b.category,
-       Number(b.total_count||0), Number(b.head_count||0),
-       b.light_type||"", b.sl_point_id||null, b.notes||"", req.params.id]
+       Number(b.total_count||0), Number(b.head_count||0), Number(b.needs_poles||0),
+       b.light_type||"", b.sl_point_id||null, b.notes||"", b.asset_id||null, req.params.id]
     );
     await audit(req.user.id, "UPDATE", "sl_ger_inventory", req.params.id, b.location_name.trim());
     res.json({ ok: true });
@@ -1134,6 +1168,7 @@ router.post("/sl-faults", auth, async (req, res) => {
        b.total_heads||0, b.broken_count||0, b.report_date||null, b.notes||null, req.user.id]
     );
     await audit(req.user.id, "CREATE", "sl_faults", r.id, `${b.category}: ${b.location_name}`);
+    await saveLightingDailySnapshot(b.report_date || null, "fault_create").catch(() => {});
     res.json({ id: r.id });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -1147,6 +1182,7 @@ router.put("/sl-faults/:id", auth, async (req, res) => {
       [b.category, b.location_id||null, b.location_name, b.total_heads||0,
        b.broken_count||0, b.notes||null, b.report_date||null, req.params.id]
     );
+    await saveLightingDailySnapshot(b.report_date || null, "fault_update").catch(() => {});
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -1155,6 +1191,7 @@ router.delete("/sl-faults/:id", auth, async (req, res) => {
   try {
     await run("DELETE FROM sl_fault_repairs WHERE fault_id=?", [req.params.id]);
     await run("DELETE FROM sl_faults WHERE id=?", [req.params.id]);
+    await saveLightingDailySnapshot(null, "fault_delete").catch(() => {});
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -1203,7 +1240,148 @@ router.post("/sl-fault-repairs", auth, async (req, res) => {
 
     await audit(req.user.id, "CREATE", "sl_fault_repairs", r.id,
       `${fault.location_name}: ${headsFix} толгой засав`);
+    await saveLightingDailySnapshot(b.repair_date || null, "repair_create").catch(() => {});
     res.json({ id: r.id, newBroken, newFixed, newStatus });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Analytics: top fault locations + MTTR ──────────────────
+router.get("/sl-analytics/locations", auth, async (req, res) => {
+  try {
+    const year  = String(req.query.year || new Date().getFullYear()).replace(/[^\d]/g,"").slice(0,4);
+    const start = `${year}-01-01`;
+    const end   = `${Number(year)+1}-01-01`;
+    const [locations, mttrRow] = await Promise.all([
+      all(`
+        SELECT f.category, f.location_name,
+               COUNT(*) fault_count,
+               SUM(f.broken_count + f.fixed_count) reported_heads,
+               SUM(f.fixed_count) repaired_heads,
+               SUM(CASE WHEN f.status!='Дууссан' THEN f.broken_count ELSE 0 END) open_heads,
+               ROUND(AVG(CASE WHEN r.first_repair IS NOT NULL
+                 THEN julianday(r.first_repair) - julianday(f.report_date) END), 1) avg_days_to_repair
+        FROM sl_faults f
+        LEFT JOIN (SELECT fault_id, MIN(repair_date) first_repair
+                   FROM sl_fault_repairs GROUP BY fault_id) r ON r.fault_id = f.id
+        WHERE f.report_date >= ? AND f.report_date < ?
+        GROUP BY f.category, f.location_name
+        ORDER BY reported_heads DESC
+        LIMIT 20`, [start, end]),
+      get(`
+        SELECT ROUND(AVG(julianday(r.first_repair) - julianday(f.report_date)), 1) overall_mttr,
+               COUNT(DISTINCT f.id) total_faults,
+               COUNT(DISTINCT CASE WHEN f.status='Дууссан' THEN f.id END) resolved_faults
+        FROM sl_faults f
+        LEFT JOIN (SELECT fault_id, MIN(repair_date) first_repair
+                   FROM sl_fault_repairs GROUP BY fault_id) r ON r.fault_id = f.id
+        WHERE f.report_date >= ? AND f.report_date < ?`, [start, end])
+    ]);
+    res.json({ year: Number(year), locations, mttr: mttrRow });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Analytics: Excel export ─────────────────────────────────
+router.get("/sl-analytics/export", auth, async (req, res) => {
+  try {
+    const year  = String(req.query.year || new Date().getFullYear()).replace(/[^\d]/g,"").slice(0,4);
+    const start = `${year}-01-01`;
+    const end   = `${Number(year)+1}-01-01`;
+    const cats  = LIGHTING_CATEGORIES;
+
+    const [totals, reported, repaired, openNow, locations, snapshots] = await Promise.all([
+      lightingCategoryTotals(),
+      all(`SELECT category, substr(report_date,1,7) ym,
+                  SUM(broken_count + fixed_count) reported_heads, COUNT(*) fault_count
+           FROM sl_faults WHERE report_date>=? AND report_date<?
+           GROUP BY category, substr(report_date,1,7)`, [start, end]),
+      all(`SELECT f.category, substr(r.repair_date,1,7) ym, SUM(r.heads_fixed) repaired_heads
+           FROM sl_fault_repairs r JOIN sl_faults f ON f.id=r.fault_id
+           WHERE r.repair_date>=? AND r.repair_date<?
+           GROUP BY f.category, substr(r.repair_date,1,7)`, [start, end]),
+      all(`SELECT category, SUM(broken_count) open_heads
+           FROM sl_faults WHERE status!='Дууссан' GROUP BY category`),
+      all(`SELECT f.category, f.location_name,
+                  COUNT(*) fault_count,
+                  SUM(f.broken_count + f.fixed_count) reported_heads,
+                  SUM(f.fixed_count) repaired_heads,
+                  SUM(CASE WHEN f.status!='Дууссан' THEN f.broken_count ELSE 0 END) open_heads,
+                  ROUND(AVG(CASE WHEN r.first_repair IS NOT NULL
+                    THEN julianday(r.first_repair) - julianday(f.report_date) END), 1) avg_days_to_repair
+           FROM sl_faults f
+           LEFT JOIN (SELECT fault_id, MIN(repair_date) first_repair
+                      FROM sl_fault_repairs GROUP BY fault_id) r ON r.fault_id = f.id
+           WHERE f.report_date >= ? AND f.report_date < ?
+           GROUP BY f.category, f.location_name
+           ORDER BY reported_heads DESC LIMIT 30`, [start, end]),
+      listLightingDailySnapshots({ year })
+    ]);
+
+    const repMap = {};
+    reported.forEach(r => { repMap[`${r.category}|${r.ym}`] = r; });
+    const fixMap = {};
+    repaired.forEach(r => { fixMap[`${r.category}|${r.ym}`] = r; });
+    const openMap = {};
+    openNow.forEach(r => { openMap[r.category] = r; });
+    const snapshotByMonth = {};
+    snapshots.forEach(s => {
+      const ym = String(s.snapshot_date || "").slice(0, 7);
+      if (!snapshotByMonth[ym]) snapshotByMonth[ym] = {};
+      const prev = snapshotByMonth[ym][s.category];
+      if (!prev || String(s.snapshot_date) > String(prev.snapshot_date)) snapshotByMonth[ym][s.category] = s;
+    });
+
+    const months = Array.from({ length: 12 }, (_, i) => {
+      const ym = `${year}-${String(i+1).padStart(2,"0")}`;
+      let rep=0, fix=0, fc=0, open=0, cap=0;
+      cats.forEach(cat => {
+        const r = repMap[`${cat}|${ym}`] || {};
+        const f = fixMap[`${cat}|${ym}`] || {};
+        const snap = snapshotByMonth[ym]?.[cat] || null;
+        const catOpen = snap ? Number(snap.broken_count||0) : 0;
+        const catCap  = snap ? Number(snap.total_count||0)  : (totals[cat]||0);
+        rep  += Number(r.reported_heads||0);
+        fix  += Number(f.repaired_heads||0);
+        fc   += Number(r.fault_count||0);
+        open += catOpen;
+        cap  += catCap;
+      });
+      return {
+        label: `${i+1}-р сар`, fault_count: fc, reported_heads: rep,
+        repaired_heads: fix, open_heads: open,
+        availability_pct: cap > 0 ? Number(Math.max(0,(cap-open)/cap*100).toFixed(1)) : ""
+      };
+    });
+
+    const wb = XLSX.utils.book_new();
+
+    XLSX.utils.book_append_sheet(wb,
+      XLSX.utils.aoa_to_sheet([
+        ["Сар", "Бүртгэл тоо", "Гэмтсэн толгой", "Зассан толгой", "Үлдсэн толгой", "Асалт %"],
+        ...months.map(m => [m.label, m.fault_count, m.reported_heads, m.repaired_heads, m.open_heads, m.availability_pct])
+      ]), "Сарын явц");
+
+    XLSX.utils.book_append_sheet(wb,
+      XLSX.utils.aoa_to_sheet([
+        ["Төрөл", "Нийт толгой", "Гэмтсэн", "Зассан", "Одоо асахгүй", "Асалт %"],
+        ...cats.map(cat => {
+          const r = reported.filter(x=>x.category===cat).reduce((s,x)=>s+Number(x.reported_heads||0),0);
+          const f = repaired.filter(x=>x.category===cat).reduce((s,x)=>s+Number(x.repaired_heads||0),0);
+          const open = Number(openMap[cat]?.open_heads||0);
+          const cap = totals[cat]||0;
+          return [cat, cap, r, f, open, cap>0?Number(Math.max(0,(cap-open)/cap*100).toFixed(1)):""];
+        })
+      ]), "Төрлөөр");
+
+    XLSX.utils.book_append_sheet(wb,
+      XLSX.utils.aoa_to_sheet([
+        ["№", "Төрөл", "Байршил", "Гэмтэл тоо", "Гэмтсэн толгой", "Зассан", "Үлдсэн", "MTTR (хоног)"],
+        ...locations.map((r,i) => [i+1, r.category, r.location_name, r.fault_count, r.reported_heads, r.repaired_heads, r.open_heads, r.avg_days_to_repair ?? ""])
+      ]), "Байршлаар");
+
+    const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+    res.setHeader("Content-Disposition", `attachment; filename=gereltuuleg-sudalgaa-${year}.xlsx`);
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.send(buf);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

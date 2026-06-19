@@ -1,0 +1,13 @@
+{
+  "name": "Чойбалсан хөгжил",
+  "short_name": "ЧХ ERP",
+  "description": "Чойбалсан хөгжил ОНӨҮГ — Дотоод систем",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#2563eb",
+  "icons": [
+    { "src": "/logo.jpg", "sizes": "192x192", "type": "image/jpeg" },
+    { "src": "/logo.jpg", "sizes": "512x512", "type": "image/jpeg" }
+  ]
+}

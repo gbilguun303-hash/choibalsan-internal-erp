@@ -1,14 +1,234 @@
 import { state, api, toast, today, escapeHtml, table } from './common.js';
 
 const canEdit = () => ["director","accountant"].includes(state.me.role);
-const fmt = n => Number(n||0).toLocaleString("mn-MN");
+const fmt = n => Number(n||0).toLocaleString("mn-MN", {
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 1
+});
 const fmtDate = s => s ? s.slice(0,10) : "—";
+
+const FIN_TABS = [
+  ["fin_dashboard", "💼", "Самбар"],
+  ["cash_journal",  "📋", "Мөнгөн журнал"],
+  ["payables",      "↓",  "Өглөг"],
+  ["receivables",   "↑",  "Авлага"],
+  ["fixed_ledger",  "🏢", "Үндсэн хөрөнгө"],
+  ["fin_reports",   "📑", "Тайлан"],
+];
+
+const budgetRow = (code, name, level, monthly) => ({
+  code, name, level, monthly,
+  plan: monthly.reduce((s, v) => s + Number(v || 0), 0)
+});
+const sumMonths = (...rows) => Array.from({ length: 12 }, (_, i) => rows.reduce((s, r) => s + Number(r[i] || 0), 0));
+const M_TOTAL_2026 = [112661787,106229687,168956852,112079852,100076952,179070052,97676952,97676952,157470452,106926291,70447128,41694828];
+const M_2101 = [42617063,42617063,50914063,50914063,50914063,50914063,50914063,50914063,50914063,50914063,5716100,3924000];
+const M_2102 = [6179274,6179174,7382539,7382539,7382539,7382539,7382539,7382539,7382539,6444978,6444978,6444978];
+const M_210201 = [3622250,3622150,4327695,4327695,4327695,4327695,4327695,4327695,4327695,3622450,3622450,3622450];
+const M_210202 = [426171,426171,509141,509141,509141,509141,509141,509141,509141,509141,509141,509141];
+const M_210203 = [1193278,1193278,1425594,1425594,1425594,1425594,1425594,1425594,1425594,1193278,1193278,1193278];
+const M_210204 = [85234,85234,101828,101828,101828,101828,101828,101828,101828,101828,101828,101828];
+const M_210205 = [852341,852341,1018281,1018281,1018281,1018281,1018281,1018281,1018281,1018281,1018281,1018281];
+const M_210301 = [50847300,47347300,40141100,31800100,31800100,30799700,30800100,30800100,33800100,40141100,48859900,18846200];
+const M_210302 = [845900,845900,845900,845900,0,0,0,0,0,845900,845900,845900];
+const M_210303 = [148000,148000,148000,148000,148000,148000,148000,148000,148000,148000,148000,148000];
+const M_210401 = [172833,172833,172833,172833,172833,172833,172833,172833,172833,172833,172833,172833];
+const M_210402 = [4920700,4919700,4919700,4919700,4919700,4919700,4919700,4919700,4919700,4919700,4919700,4919700];
+const M_210403 = [129000,129000,129000,129000,129000,129000,129000,129000,129000,129000,129000,129000];
+const M_210405 = [397100,396100,396100,396100,396100,396100,396100,396100,396100,396100,396100,396100];
+const M_210503 = [0,0,0,6578000,0,0,0,0,4340000,0,0,0];
+const M_210601 = [515417,515417,515417,515417,515417,515417,515417,515417,515417,515417,515417,515417];
+const M_210603 = [299200,299200,299200,6278200,299200,299200,299200,299200,299200,299200,299200,299200];
+const M_210604 = [2000000,2000000,55260000,2000000,2000000,79540000,2000000,2000000,51600000,2000000,2000000,2000000];
+const M_210801 = [0,0,2976200,0,0,2976200,0,0,1976200,0,0,1976200];
+const M_210802 = [0,0,2700000,0,0,0,0,0,0,0,0,0];
+const M_210803 = [0,0,565200,0,0,0,0,0,0,0,0,0];
+const M_210804 = [0,0,153300,0,0,0,0,0,0,0,0,0];
+const M_210805 = [0,0,121000,0,0,0,0,0,0,0,0,0];
+const M_210806 = [0,0,440000,0,0,0,0,0,0,0,0,0];
+const M_210807 = [0,0,677300,0,0,677300,0,0,677300,0,0,677300];
+const M_210902 = [0,660000,0,0,0,0,0,0,0,0,0,0];
+const M_213204 = [3590000,0,200000,0,1400000,200000,0,0,200000,0,0,400000];
+
+const FIN_BUDGET_CODE_ALIASES = {
+  "210406": "210405",
+  "210901": "210902",
+  "2205": "213204"
+};
+
+const FIN_BUDGET_PLAN_2026 = [
+  budgetRow("2", "НИЙТ ЗАРЛАГА БА ЦЭВЭР ЗЭЭЛИЙН ДҮН", 0, M_TOTAL_2026),
+  budgetRow("21", "УРСГАЛ ЗАРДАЛ", 0, M_TOTAL_2026),
+  budgetRow("210", "БАРАА, АЖИЛ ҮЙЛЧИЛГЭЭНИЙ ЗАРДАЛ", 0, M_TOTAL_2026),
+  budgetRow("2101", "Цалин хөлс болон нэмэгдэл урамшил", 1, M_2101),
+  budgetRow("210101", "Үндсэн цалин", 2, M_2101),
+  budgetRow("2102", "Ажил олгогчоос нийгмийн даатгал төлөх шимтгэл", 1, M_2102),
+  budgetRow("210201", "Тэтгэврийн даатгал", 2, M_210201),
+  budgetRow("210202", "Тэтгэмжийн даатгал", 2, M_210202),
+  budgetRow("210203", "ҮОМШӨ-ний даатгал", 2, M_210203),
+  budgetRow("210204", "Ажилгүйдлийн даатгал", 2, M_210204),
+  budgetRow("210205", "Эрүүл мэндийн даатгал", 2, M_210205),
+  budgetRow("2103", "Байр ашиглалттай холбоотой тогтмол зардал", 1, sumMonths(M_210301, M_210302, M_210303)),
+  budgetRow("210301", "Гэрэл, цахилгаан", 2, M_210301),
+  budgetRow("210302", "Түлш, халаалт", 2, M_210302),
+  budgetRow("210303", "Цэвэр, бохир ус", 2, M_210303),
+  budgetRow("2104", "Хангамж, бараа материалын зардал", 1, sumMonths(M_210401, M_210402, M_210403, M_210405)),
+  budgetRow("210401", "Бичиг хэрэг", 2, M_210401),
+  budgetRow("210402", "Тээвэр, шатахуун", 2, M_210402),
+  budgetRow("210403", "Шуудан, холбоо, интернэтийн төлбөр", 2, M_210403),
+  budgetRow("210405", "Бага үнэтэй, түргэн элэгдэх ахуйн эд зүйлс", 2, M_210405),
+  budgetRow("2105", "Нормативт зардал", 1, M_210503),
+  budgetRow("210503", "Нормын хувцас, зөөлөн эдлэл", 2, M_210503),
+  budgetRow("2106", "Эд хогшил, урсгал засварын зардал", 1, sumMonths(M_210601, M_210603, M_210604)),
+  budgetRow("210601", "Багаж, техник хэрэгсэл", 2, M_210601),
+  budgetRow("210603", "Хөдөлмөр хамгааллын хэрэгсэл", 2, M_210603),
+  budgetRow("210604", "Урсгал засвар", 2, M_210604),
+  budgetRow("2108", "Бусдаар гүйцэтгүүлсэн ажил үйлчилгээний төлбөр, хураамж", 1, sumMonths(M_210801, M_210802, M_210803, M_210804, M_210805, M_210806, M_210807)),
+  budgetRow("210801", "Бусдаар гүйцэтгэсэн ажил үйлчилгээ", 2, M_210801),
+  budgetRow("210802", "Аудит, баталгаажуулалт, зэрэглэл тогтоох", 2, M_210802),
+  budgetRow("210803", "Даатгалын үйлчилгээ", 2, M_210803),
+  budgetRow("210804", "Тээврийн хэрэгслийн татвар", 2, M_210804),
+  budgetRow("210805", "Тээврийн хэрэгслийн оношилгоо", 2, M_210805),
+  budgetRow("210806", "Мэдээлэл, технологийн үйлчилгээ", 2, M_210806),
+  budgetRow("210807", "Газрын татвар", 2, M_210807),
+  budgetRow("2109", "Бараа үйлчилгээний бусад зардал", 1, M_210902),
+  budgetRow("210902", "Сургалтын зардал", 2, M_210902),
+  budgetRow("213", "Нийгмийн халамжийн тэтгэмж, урамшуулал", 1, M_213204),
+  budgetRow("213204", "Бусад тэтгэмж, урамшуулал", 2, M_213204)
+];
+
+const parseYmdLocal = s => {
+  const [y, m, d] = String(s || "").slice(0, 10).split("-").map(Number);
+  if (!y || !m || !d) return null;
+  return new Date(y, m - 1, d);
+};
+function budgetPlanForPeriod(row, from, to) {
+  const start = parseYmdLocal(from);
+  const end = parseYmdLocal(to);
+  if (!start || !end || start > end) return 0;
+  let sum = 0;
+  for (let month = 1; month <= 12; month++) {
+    const monthStart = new Date(2026, month - 1, 1);
+    const monthEnd = new Date(2026, month, 0);
+    if (start <= monthEnd && end >= monthStart) {
+      sum += Number(row.monthly?.[month - 1] || 0);
+    }
+  }
+  return sum;
+}
+
+let _financeTab = "fin_dashboard";
+let _financeNavObserver = null;
+let _financeNavQueued = false;
+
+function financeNavHtml() {
+  return `
+    <div id="financeShellNav" style="background:#fff;border:1px solid #e2e8f0;border-radius:12px;margin-bottom:14px;overflow:hidden">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 18px;border-bottom:1px solid #e2e8f0;flex-wrap:wrap">
+        <div>
+          <div style="font-size:18px;font-weight:900;color:#0f172a">💼 Санхүүгийн ажлын талбар</div>
+          <div style="font-size:12px;color:#64748b;margin-top:2px">Нягтлангийн бүртгэл, өглөг авлага, тайлан</div>
+        </div>
+        ${canEdit() ? `<button class="btn sm" onclick="openSmartImport()">🧠 Smart Import</button>` : ""}
+      </div>
+      <div style="display:flex;gap:0;overflow-x:auto;padding:0 12px">
+        ${FIN_TABS.map(([key, icon, label]) => `
+          <button onclick="finOpen('${key}')" id="finTab_${key}"
+            style="padding:12px 14px;font-size:13px;font-weight:700;border:none;background:transparent;
+                   color:${_financeTab===key ? '#2563eb' : '#64748b'};cursor:pointer;white-space:nowrap;
+                   display:flex;align-items:center;gap:6px;border-bottom:${_financeTab===key ? '3px solid #2563eb' : '3px solid transparent'}">
+            <span>${icon}</span>${label}
+          </button>`).join("")}
+      </div>
+    </div>`;
+}
+
+function injectFinanceNav() {
+  const mainEl = document.getElementById("main");
+  if (!mainEl || document.getElementById("financeShellNav")) return;
+  mainEl.insertAdjacentHTML("afterbegin", financeNavHtml());
+}
+
+function scheduleFinanceNavInject() {
+  if (_financeNavQueued) return;
+  _financeNavQueued = true;
+  requestAnimationFrame(() => {
+    _financeNavQueued = false;
+    if (state.current === "finance") injectFinanceNav();
+  });
+}
+
+function ensureFinanceNavObserver() {
+  const mainEl = document.getElementById("main");
+  if (!mainEl) return;
+  if (_financeNavObserver) _financeNavObserver.disconnect();
+  _financeNavObserver = new MutationObserver(() => {
+    if (state.current === "finance") scheduleFinanceNavInject();
+  });
+  _financeNavObserver.observe(mainEl, { childList: true });
+}
+
+async function finance() {
+  ensureFinanceNavObserver();
+  await finOpen("fin_dashboard");
+}
+
+async function finOpen(tab = "fin_dashboard") {
+  ensureFinanceNavObserver();
+  _financeTab = FIN_TABS.some(([key]) => key === tab) ? tab : "fin_dashboard";
+  const fn = window[_financeTab];
+  if (typeof fn === "function") await fn();
+  scheduleFinanceNavInject();
+}
 
 function statCard(label, value, color, sub) {
   return `<div style="background:#fff;border:1px solid #e2e6ed;border-radius:12px;padding:14px 16px;border-top:3px solid ${color}">
     <div style="font-size:11px;color:#667085;margin-bottom:4px;text-transform:uppercase">${label}</div>
     <div style="font-size:22px;font-weight:800;color:${color}">${value}</div>
     ${sub ? `<div style="font-size:11px;color:#94a3b8;margin-top:3px">${sub}</div>` : ""}
+  </div>`;
+}
+
+const monthNameMn = m => `${Number(m)}-р сар`;
+function financeMonthControls(year, month, onChangeFn, refreshFn) {
+  const y = Number(year || today().slice(0, 4));
+  const m = Number(month || today().slice(5, 7));
+  return `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:8px 10px">
+    <span style="font-size:12px;font-weight:800;color:#334155">Хугацаа</span>
+    <select class="input" style="width:105px;margin:0;padding:6px 8px;font-size:12px" onchange="${onChangeFn}(this.value,null)">
+      ${Array.from({ length: 6 }, (_, i) => 2024 + i).map(v => `<option value="${v}" ${v === y ? "selected" : ""}>${v}</option>`).join("")}
+    </select>
+    <select class="input" style="width:105px;margin:0;padding:6px 8px;font-size:12px" onchange="${onChangeFn}(null,this.value)">
+      ${Array.from({ length: 12 }, (_, i) => i + 1).map(v => `<option value="${v}" ${v === m ? "selected" : ""}>${monthNameMn(v)}</option>`).join("")}
+    </select>
+    <button class="btn secondary sm" onclick="${refreshFn}()">↻</button>
+  </div>`;
+}
+
+function currentFinanceImportPeriod() {
+  const y = Number(
+    _financeTab === "payables" ? (window.finPayYear || today().slice(0, 4)) :
+    _financeTab === "receivables" ? (window.finRecvYear || today().slice(0, 4)) :
+    today().slice(0, 4)
+  );
+  const m = Number(
+    _financeTab === "payables" ? (window.finPayMonth || today().slice(5, 7)) :
+    _financeTab === "receivables" ? (window.finRecvMonth || today().slice(5, 7)) :
+    today().slice(5, 7)
+  );
+  return { year: y, month: m, date: `${y}-${String(m).padStart(2, "0")}-01` };
+}
+
+function importPeriodControls(prefix = "si") {
+  const p = currentFinanceImportPeriod();
+  return `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:10px 12px;margin-bottom:14px">
+    <span style="font-size:12px;font-weight:900;color:#92400e">Огноогүй өглөг/авлагыг энэ сард хадгална</span>
+    <select id="${prefix}Year" class="input" style="width:95px;margin:0;padding:6px 8px;font-size:12px">
+      ${Array.from({ length: 6 }, (_, i) => 2024 + i).map(v => `<option value="${v}" ${v === p.year ? "selected" : ""}>${v}</option>`).join("")}
+    </select>
+    <select id="${prefix}Month" class="input" style="width:105px;margin:0;padding:6px 8px;font-size:12px">
+      ${Array.from({ length: 12 }, (_, i) => i + 1).map(v => `<option value="${v}" ${v === p.month ? "selected" : ""}>${monthNameMn(v)}</option>`).join("")}
+    </select>
   </div>`;
 }
 
@@ -21,6 +241,20 @@ async function fin_dashboard() {
 
   const bal = Number(s.cash_balance||0);
   const balColor = bal >= 0 ? "#16a34a" : "#dc2626";
+  const monthlyBudgetTotal = M_TOTAL_2026.reduce((sum, v) => sum + Number(v || 0), 0);
+  const monthlyBudgetPlanHtml = `<div class="table-wrap">${table(
+    ["Сар", "Төлөвлөгөөний дүн"],
+    [
+      ...M_TOTAL_2026.map((amount, i) => [
+        `${i + 1}-р сар`,
+        `<b style="color:#2563eb">${fmt(amount)}₮</b>`
+      ]),
+      [
+        `<b>Нийт</b>`,
+        `<b style="color:#16a34a">${fmt(monthlyBudgetTotal)}₮</b>`
+      ]
+    ]
+  )}</div>`;
 
   main.innerHTML = `
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
@@ -37,35 +271,21 @@ async function fin_dashboard() {
     ${statCard("Мөнгөн хөрөнгийн үлдэгдэл", fmt(s.cash_balance)+"₮", balColor)}
   </div>
   <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:24px">
-    ${statCard("Нийт өглөг (төлөгдөөгүй)", fmt(s.total_payable)+"₮", "#d97706")}
-    ${statCard("Нийт авлага (хүлээгдэж буй)", fmt(s.total_receivable)+"₮", "#7c3aed")}
-    ${statCard("Энэ сарын цалин", fmt(s.current_payroll)+"₮", "#0891b2")}
+    ${statCard("Нийт өглөг (төлөгдөөгүй)", fmt(s.total_payable)+"₮", "#d97706", s.payable_period ? `Сүүлийн сар: ${s.payable_period}` : "Сарын мэдээлэл алга")}
+    ${statCard("Нийт авлага (хүлээгдэж буй)", fmt(s.total_receivable)+"₮", "#7c3aed", s.receivable_period ? `Сүүлийн сар: ${s.receivable_period}` : "Сарын мэдээлэл алга")}
+    ${statCard("210101 үндсэн цалин", fmt(s.current_salary_210101 ?? s.current_payroll)+"₮", "#0891b2", "Мөнгөн журналын нийлбэр")}
   </div>
 
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px">
     <div class="panel">
-      <div style="padding:14px 18px;border-bottom:1px solid #e2e6ed;font-weight:700;font-size:14px">📋 Сүүлийн журналын бичилтүүд</div>
-      <div id="dashJournal" style="padding:14px 18px;font-size:13px;color:#94a3b8">Уншиж байна...</div>
+      <div style="padding:14px 18px;border-bottom:1px solid #e2e6ed;font-weight:700;font-size:14px">📊 2026 оны сарын төсвийн төлөвлөгөө</div>
+      <div id="dashJournal" style="padding:14px 18px;font-size:13px;color:#334155">${monthlyBudgetPlanHtml}</div>
     </div>
     <div class="panel">
       <div style="padding:14px 18px;border-bottom:1px solid #e2e6ed;font-weight:700;font-size:14px">⚠️ Хугацаа дууссан өглөгүүд</div>
       <div id="dashPayable" style="padding:14px 18px;font-size:13px;color:#94a3b8">Уншиж байна...</div>
     </div>
   </div>`;
-
-  try {
-    const rows = await api("/api/cash-journal?txn_type=");
-    const recent = rows.slice(0,6);
-    document.getElementById("dashJournal").innerHTML = recent.length
-      ? `<div class="table-wrap">${table(
-          ["Огноо","Төрөл","Тайлбар","Дүн"],
-          recent.map(r=>[fmtDate(r.txn_date),
-            `<span style="color:${r.txn_type==='Орлого'?'#16a34a':'#dc2626'}">${escapeHtml(r.txn_type)}</span>`,
-            escapeHtml(r.description),
-            `<b>${fmt(r.amount)}₮</b>`])
-        )}</div>`
-      : "<div style='color:#94a3b8'>Мэдээлэл алга</div>";
-  } catch(e) {}
 
   try {
     const payables = await api("/api/payables");
@@ -85,21 +305,45 @@ async function fin_dashboard() {
 // ── 2. Мөнгөн хөрөнгийн журнал ──────────────────────────────
 
 async function cash_journal() {
-  let rows = [], fromDate = today().slice(0,4)+"-01-01", toDate = today();
+  let rows = [], prevRows = [], fromDate = today().slice(0,4)+"-01-01", toDate = today();
+  const prevDay = d => {
+    const dt = new Date(`${d}T00:00:00`);
+    dt.setDate(dt.getDate() - 1);
+    return dt.toISOString().slice(0, 10);
+  };
+  const cashSignedAmount = r => (r.txn_type === "Орлого" ? 1 : -1) * Number(r.amount || 0);
+  const cashEndingBalance = list => {
+    let balance = 0;
+    [...list].reverse().forEach(r => {
+      const imported = r.imported_balance;
+      if (imported !== null && imported !== undefined && imported !== "") balance = Number(imported || 0);
+      else balance += cashSignedAmount(r);
+    });
+    return balance;
+  };
   async function load() {
-    try { rows = await api(`/api/cash-journal?from=${fromDate}&to=${toDate}`); } catch(e) { rows = []; }
+    try {
+      const before = prevDay(fromDate);
+      [rows, prevRows] = await Promise.all([
+        api(`/api/cash-journal?from=${fromDate}&to=${toDate}`).catch(() => []),
+        api(`/api/cash-journal?to=${before}`).catch(() => []),
+      ]);
+    } catch(e) { rows = []; prevRows = []; }
     render();
   }
 
   function render() {
     const totalIn  = rows.filter(r=>r.txn_type==="Орлого").reduce((s,r)=>s+Number(r.amount),0);
     const totalOut = rows.filter(r=>r.txn_type==="Зарлага").reduce((s,r)=>s+Number(r.amount),0);
-    // Calculate running balance (ASC order → assign _balance → display in DESC)
-    let bal = 0;
+    const openingBalance = cashEndingBalance(prevRows);
+    let bal = openingBalance;
     [...rows].reverse().forEach(r => {
-      bal += (r.txn_type==="Орлого" ? 1 : -1) * Number(r.amount);
+      const imported = r.imported_balance;
+      if (imported !== null && imported !== undefined && imported !== "") bal = Number(imported || 0);
+      else bal += cashSignedAmount(r);
       r._balance = bal;
     });
+    const closingBalance = bal;
     main.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px">
       <div>
@@ -109,10 +353,12 @@ async function cash_journal() {
       ${canEdit() ? `<button class="btn" onclick="openCashForm()">+ Бичилт нэмэх</button>` : ""}
     </div>
 
-    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:18px">
+    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:18px">
+      ${statCard("Эхний үлдэгдэл", fmt(openingBalance)+"₮", openingBalance>=0?"#2563eb":"#dc2626")}
       ${statCard("Нийт орлого", fmt(totalIn)+"₮", "#16a34a")}
       ${statCard("Нийт зарлага", fmt(totalOut)+"₮", "#dc2626")}
       ${statCard("Цэвэр дүн", fmt(totalIn-totalOut)+"₮", totalIn>=totalOut?"#2563eb":"#dc2626")}
+      ${statCard("Эцсийн үлдэгдэл", fmt(closingBalance)+"₮", closingBalance>=0?"#16a34a":"#dc2626")}
     </div>
 
     <div class="panel">
@@ -129,33 +375,40 @@ async function cash_journal() {
       </div>
       <div class="table-wrap">
         ${table(
-          ["№","Огноо","Журнал №","Регистер","Байгуулллага","Орлого ₮","Зарлага ₮","Үлдэгдэл","Ханш","Валют","Гүйлгээний утга","Харцсан данс","Мөнгөн гүйлгээ тайлан","Хэтэлбэр","Зориулалт, арга хэмжээ","Эх үүсвэр","Эдийн засгийн ангилал","Шилжүүлэгч","Хүлээн авагч",""],
-          rows.length ? rows.map((r,i) => {
+          ["Огноо","Регистер","Байгууллага","Орлого","Зарлага","Үлдэгдэл","Ханш","Валют","Гүйлгээний утга","Харьцсан данс","Мөнгөн гүйлгээ тайлан",""],
+          (rows.length || openingBalance) ? [
+            ...rows.map((r,i) => {
             const s = v => `<span style="font-size:11px;color:#374151">${escapeHtml(String(v||"—"))}</span>`;
             return [
-              i+1,
               fmtDate(r.txn_date),
-              escapeHtml(r.doc_no||"—"),
               s(r.register_no),
               s(r.counterparty),
               r.txn_type==="Орлого"  ? `<b style="color:#16a34a">${fmt(r.amount)}</b>` : `<span style="color:#cbd5e1">—</span>`,
               r.txn_type==="Зарлага" ? `<b style="color:#dc2626">${fmt(r.amount)}</b>` : `<span style="color:#cbd5e1">—</span>`,
-              `<b style="color:${r._balance>=0?'#16a34a':'#dc2626'}">${fmt(r._balance)}</b>`,
+              `<b style="color:${Number(r.imported_balance ?? r._balance)>=0?'#16a34a':'#dc2626'}">${fmt(r.imported_balance ?? r._balance)}</b>`,
               Number(r.exchange_rate||1)!==1 ? r.exchange_rate : `<span style="color:#cbd5e1">1</span>`,
               escapeHtml(r.currency||"MNT"),
               s(r.description),
               s(r.corr_account),
               s(r.cash_flow_type),
-              s(r.excess),
-              s(r.purpose),
-              s(r.source_fund),
-              s(r.econ_category),
-              s(r.transferor),
-              s(r.receiver),
               canEdit() ? `<button class="btn secondary sm" onclick="editCash(${r.id})" style="margin-right:4px">✏</button>
                 ${state.me.role==='director'?`<button class="btn secondary sm" style="color:#dc2626" onclick="delCash(${r.id})">🗑</button>`:""}` : ""
             ];
-          }) : []
+          }),
+          [
+            fmtDate(fromDate),
+            `<span style="color:#94a3b8">—</span>`,
+            `<b style="color:#334155">Эхний үлдэгдэл</b>`,
+            `<span style="color:#cbd5e1">—</span>`,
+            `<span style="color:#cbd5e1">—</span>`,
+            `<b style="color:${openingBalance>=0?'#2563eb':'#dc2626'}">${fmt(openingBalance)}</b>`,
+            `<span style="color:#cbd5e1">1</span>`,
+            `MNT`,
+            `<span style="font-size:11px;color:#64748b">Өмнөх сарын эцсийн үлдэгдэл</span>`,
+            `<span style="color:#94a3b8">—</span>`,
+            `<span style="color:#94a3b8">—</span>`,
+            ``
+          ]] : []
         )}
       </div>
     </div>
@@ -297,8 +550,10 @@ async function cash_journal() {
 
 async function payables() {
   let rows = [];
+  let payYear = Number(window.finPayYear || today().slice(0, 4));
+  let payMonth = Number(window.finPayMonth || today().slice(5, 7));
   async function load() {
-    try { rows = await api("/api/payables"); } catch(e) { rows = []; }
+    try { rows = await api(`/api/payables?year=${payYear}&month=${payMonth}`); } catch(e) { rows = []; }
     render();
   }
   function render() {
@@ -307,8 +562,11 @@ async function payables() {
     main.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px">
       <div><h1 style="margin:0 0 4px">↓ Өглөгийн бүртгэл</h1>
-        <div style="font-size:12px;color:#667085">Accounts Payable · Хийх төлбөрийн хяналт</div></div>
-      ${canEdit()?`<button class="btn" onclick="openPayableForm()">+ Өглөг бүртгэх</button>`:""}
+        <div style="font-size:12px;color:#667085">Accounts Payable · ${payYear} оны ${monthNameMn(payMonth)} · Хийх төлбөрийн хяналт</div></div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end">
+        ${financeMonthControls(payYear, payMonth, "setPayablePeriod", "payables")}
+        ${canEdit()?`<button class="btn" onclick="openPayableForm()">+ Өглөг бүртгэх</button>`:""}
+      </div>
     </div>
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:18px">
       ${statCard("Нийт төлөх өглөг", fmt(totalUnpaid)+"₮", "#d97706")}
@@ -317,7 +575,7 @@ async function payables() {
     </div>
     <div class="panel">
       <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid #e2e6ed">
-        <span style="font-weight:700;font-size:14px">Өглөгийн жагсаалт</span>
+        <span style="font-weight:700;font-size:14px">Өглөгийн жагсаалт · ${payYear}-${String(payMonth).padStart(2,"0")}</span>
         ${canEdit() ? `<button class="btn sm" onclick="openSmartImport()">🧠 Smart Import</button>` : ""}
       </div>
       <div class="table-wrap">
@@ -364,6 +622,13 @@ async function payables() {
       </div>
     </div>`;
 
+    window.setPayablePeriod = (year, month) => {
+      if (year !== null && year !== undefined) payYear = Number(year);
+      if (month !== null && month !== undefined) payMonth = Number(month);
+      window.finPayYear = payYear;
+      window.finPayMonth = payMonth;
+      load();
+    };
     window.openPayableForm = () => {
       ["pay_id","pay_vendor","pay_inv","pay_amt","pay_paid","pay_cat","pay_desc"].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=""; });
       document.getElementById("pay_idate").value = today();
@@ -418,8 +683,10 @@ async function payables() {
 
 async function receivables() {
   let rows = [];
+  let recvYear = Number(window.finRecvYear || today().slice(0, 4));
+  let recvMonth = Number(window.finRecvMonth || today().slice(5, 7));
   async function load() {
-    try { rows = await api("/api/receivables"); } catch(e) { rows = []; }
+    try { rows = await api(`/api/receivables?year=${recvYear}&month=${recvMonth}`); } catch(e) { rows = []; }
     render();
   }
   function render() {
@@ -427,8 +694,11 @@ async function receivables() {
     main.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px">
       <div><h1 style="margin:0 0 4px">↑ Авлагын бүртгэл</h1>
-        <div style="font-size:12px;color:#667085">Accounts Receivable · Авах мөнгөний хяналт</div></div>
-      ${canEdit()?`<button class="btn" onclick="openRecvForm()">+ Авлага бүртгэх</button>`:""}
+        <div style="font-size:12px;color:#667085">Accounts Receivable · ${recvYear} оны ${monthNameMn(recvMonth)} · Авах мөнгөний хяналт</div></div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end">
+        ${financeMonthControls(recvYear, recvMonth, "setReceivablePeriod", "receivables")}
+        ${canEdit()?`<button class="btn" onclick="openRecvForm()">+ Авлага бүртгэх</button>`:""}
+      </div>
     </div>
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:18px">
       ${statCard("Нийт авах авлага", fmt(totalPending)+"₮", "#7c3aed")}
@@ -437,7 +707,7 @@ async function receivables() {
     </div>
     <div class="panel">
       <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid #e2e6ed">
-        <span style="font-weight:700;font-size:14px">Авлагын жагсаалт</span>
+        <span style="font-weight:700;font-size:14px">Авлагын жагсаалт · ${recvYear}-${String(recvMonth).padStart(2,"0")}</span>
         ${canEdit() ? `<button class="btn sm" onclick="openSmartImport()">🧠 Smart Import</button>` : ""}
       </div>
       <div class="table-wrap">
@@ -484,6 +754,13 @@ async function receivables() {
       </div>
     </div>`;
 
+    window.setReceivablePeriod = (year, month) => {
+      if (year !== null && year !== undefined) recvYear = Number(year);
+      if (month !== null && month !== undefined) recvMonth = Number(month);
+      window.finRecvYear = recvYear;
+      window.finRecvMonth = recvMonth;
+      load();
+    };
     window.openRecvForm = () => {
       ["rv_id","rv_debtor","rv_inv","rv_amt","rv_recv","rv_cat","rv_desc"].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=""; });
       document.getElementById("rv_idate").value = today();
@@ -571,7 +848,6 @@ async function fixed_ledger() {
               <th rowspan="2" style="padding:6px 8px;border:1px solid #e2e6ed">Данс</th>
               <th rowspan="2" style="padding:6px 8px;border:1px solid #e2e6ed">Код</th>
               <th rowspan="2" style="padding:6px 8px;border:1px solid #e2e6ed;min-width:160px">Хөрөнгийн нэр</th>
-              <th rowspan="2" style="padding:6px 8px;border:1px solid #e2e6ed">Загвар</th>
               <th rowspan="2" style="padding:6px 8px;border:1px solid #e2e6ed">х.нэгж</th>
               <th rowspan="2" style="padding:6px 8px;border:1px solid #e2e6ed">Огноо</th>
               <th rowspan="2" style="padding:6px 8px;border:1px solid #e2e6ed">Ашиглах жил</th>
@@ -581,14 +857,6 @@ async function fixed_ledger() {
               <th colspan="2" style="padding:6px 8px;border:1px solid #e2e6ed;text-align:center;background:#fee2e2">Зарлага</th>
               <th colspan="2" style="padding:6px 8px;border:1px solid #e2e6ed;text-align:center;background:#fef9c3">Сайжруулалт</th>
               <th colspan="2" style="padding:6px 8px;border:1px solid #e2e6ed;text-align:center;background:#ede9fe">Эцсийн үлдэгдэл</th>
-              <th colspan="2" style="padding:6px 8px;border:1px solid #e2e6ed;text-align:center;background:#fce7f3">Дахин үнэлгээний нөмэгдэл</th>
-              <th rowspan="2" style="padding:6px 8px;border:1px solid #e2e6ed;background:#fce7f3">Дахин үнэлгээний зөрүү</th>
-              <th rowspan="2" style="padding:6px 8px;border:1px solid #e2e6ed;background:#fff7ed">Оны эхний элэгдэл</th>
-              <th colspan="2" style="padding:6px 8px;border:1px solid #e2e6ed;text-align:center;background:#fff7ed">Элэгдэл</th>
-              <th colspan="12" style="padding:6px 8px;border:1px solid #e2e6ed;text-align:center;background:#f0fdf4">Нэмэгдсэн элэгдэл (сараар)</th>
-              <th rowspan="2" style="padding:6px 8px;border:1px solid #e2e6ed;background:#f0fdf4">Нийт нэмэгдсэн элэгдэл</th>
-              <th rowspan="2" style="padding:6px 8px;border:1px solid #e2e6ed;background:#f0fdf4">Хасагдсан нооцдох элэгдэл</th>
-              <th rowspan="2" style="padding:6px 8px;border:1px solid #e2e6ed;background:#f0fdf4">Элэгдэл</th>
               <th rowspan="2" style="padding:6px 8px;border:1px solid #e2e6ed;background:#dcfce7;font-weight:800">Үлдэгдэл өртөг</th>
               ${canEdit() ? `<th rowspan="2" style="padding:6px 8px;border:1px solid #e2e6ed"></th>` : ""}
             </tr>
@@ -603,11 +871,6 @@ async function fixed_ledger() {
               <th style="padding:4px 8px;border:1px solid #e2e6ed;background:#fef9c3">Зарлага</th>
               <th style="padding:4px 8px;border:1px solid #e2e6ed;background:#ede9fe">Тоо</th>
               <th style="padding:4px 8px;border:1px solid #e2e6ed;background:#ede9fe">Дүн</th>
-              <th style="padding:4px 8px;border:1px solid #e2e6ed;background:#fce7f3">Оны эхний</th>
-              <th style="padding:4px 8px;border:1px solid #e2e6ed;background:#fce7f3">Хасагдсан</th>
-              <th style="padding:4px 8px;border:1px solid #e2e6ed;background:#fff7ed">Шилжиж ирсэн</th>
-              <th style="padding:4px 8px;border:1px solid #e2e6ed;background:#fff7ed">Зарлуулга</th>
-              ${[1,2,3,4,5,6,7,8,9,10,11,12].map(m=>`<th style="padding:4px 8px;border:1px solid #e2e6ed;background:#f0fdf4">${m}-р сар</th>`).join("")}
             </tr>
           </thead>
           <tbody>
@@ -619,7 +882,6 @@ async function fixed_ledger() {
                 ${s(r.account_code)}
                 ${s(r.asset_code_manual||r.asset_code)}
                 <td style="padding:4px 8px;border:1px solid #f1f5f9;font-weight:600">${escapeHtml(r.asset_name_manual||r.asset_name||"—")}</td>
-                ${s(r.asset_model)}
                 ${s(r.unit||"ш")}
                 <td style="padding:4px 8px;border:1px solid #f1f5f9">${fmtDate(r.acquisition_date)}</td>
                 <td style="padding:4px 8px;border:1px solid #f1f5f9;text-align:right">${r.useful_life_months ? (r.useful_life_months/12).toFixed(1)+" жил" : "—"}</td>
@@ -629,16 +891,6 @@ async function fixed_ledger() {
                 ${n(r.issue_qty_fa)}${n(r.issue_amount_fa)}
                 ${n(r.improve_income)}${n(r.improve_expense)}
                 ${n(r.final_qty)}   ${n(r.final_amount)}
-                ${n(r.reval_opening)}${n(r.reval_disposed)}
-                ${n(r.reval_diff)}
-                ${n(r.depr_year_opening)}
-                ${n(r.depr_opening)}${n(r.depr_disposed)}
-                ${n(r.depr_m1)}${n(r.depr_m2)}${n(r.depr_m3)}${n(r.depr_m4)}
-                ${n(r.depr_m5)}${n(r.depr_m6)}${n(r.depr_m7)}${n(r.depr_m8)}
-                ${n(r.depr_m9)}${n(r.depr_m10)}${n(r.depr_m11)}${n(r.depr_m12)}
-                ${n(r.depr_total_added)}
-                ${n(r.depr_deducted)}
-                ${n(r.accumulated_depreciation)}
                 <td style="padding:4px 8px;border:1px solid #f1f5f9;text-align:right;background:#f0fdf4;font-weight:800;color:#16a34a">${fmt(r.book_value)}₮</td>
                 ${canEdit() ? `<td style="padding:4px 8px;border:1px solid #f1f5f9">
                   <button class="btn secondary sm" onclick="editLedger(${r.id})">✏️</button>
@@ -936,35 +1188,87 @@ async function payroll() {
 // ── 7. Санхүүгийн тайлан ────────────────────────────────────
 
 async function fin_reports() {
-  let cashRows=[], payRows=[], recvRows=[], payrollRows=[];
+  let cashRows=[], payRows=[], recvRows=[];
   const now = new Date();
-  let yr = now.getFullYear(), mo = now.getMonth()+1;
+  let reportFrom = window._finReportFrom || `${now.getFullYear()}-01-01`;
+  let reportTo = window._finReportTo || today();
+  const periodRange = () => {
+    return {
+      from: reportFrom,
+      to: reportTo,
+      label: `${reportFrom} - ${reportTo}`
+    };
+  };
+  const rowInPeriod = (r, dateKeys, from, to) => {
+    const date = dateKeys.map(k => r[k]).find(Boolean);
+    if (!date) return false;
+    const d = String(date).slice(0, 10);
+    return d >= from && d <= to;
+  };
 
   async function load() {
+    const period = periodRange();
     try {
-      [cashRows, payRows, recvRows, payrollRows] = await Promise.all([
-        api("/api/cash-journal"),
+      [cashRows, payRows, recvRows] = await Promise.all([
+        api(`/api/cash-journal?from=${period.from}&to=${period.to}`),
         api("/api/payables"),
-        api("/api/receivables"),
-        api(`/api/payroll?year=${yr}&month=${mo}`)
+        api("/api/receivables")
       ]);
     } catch(e) {}
     render();
   }
 
   function render() {
+    const period = periodRange();
+    const payPeriodRows = payRows.filter(r => rowInPeriod(r, ["invoice_date", "due_date", "created_at"], period.from, period.to));
+    const recvPeriodRows = recvRows.filter(r => rowInPeriod(r, ["invoice_date", "due_date", "created_at"], period.from, period.to));
     const cashIn  = cashRows.filter(r=>r.txn_type==="Орлого").reduce((s,r)=>s+Number(r.amount),0);
     const cashOut = cashRows.filter(r=>r.txn_type==="Зарлага").reduce((s,r)=>s+Number(r.amount),0);
-    const payTotal   = payRows.reduce((s,r)=>s+Number(r.amount),0);
-    const payPaid    = payRows.reduce((s,r)=>s+Number(r.paid_amount),0);
-    const recvTotal  = recvRows.reduce((s,r)=>s+Number(r.amount),0);
-    const recvGot    = recvRows.reduce((s,r)=>s+Number(r.received_amount),0);
-    const prNet      = payrollRows.reduce((s,r)=>s+Number(r.net_salary),0);
+    const payTotal   = payPeriodRows.reduce((s,r)=>s+Number(r.amount),0);
+    const payPaid    = payPeriodRows.reduce((s,r)=>s+Number(r.paid_amount),0);
+    const recvTotal  = recvPeriodRows.reduce((s,r)=>s+Number(r.amount),0);
+    const recvGot    = recvPeriodRows.reduce((s,r)=>s+Number(r.received_amount),0);
+    const budgetCodeOf = r => {
+      const text = [r.cash_flow_type, r.econ_category, r.corr_account].filter(Boolean).join(" ");
+      const m = String(text).match(/(^|\D)(\d{1,6})(?=\D|$)/);
+      const code = m ? m[2] : "";
+      return FIN_BUDGET_CODE_ALIASES[code] || code;
+    };
+    const expenseRows = cashRows
+      .filter(r => r.txn_type === "Зарлага")
+      .map(r => ({ ...r, _budgetCode: budgetCodeOf(r) }));
+    const budgetRows = FIN_BUDGET_PLAN_2026.map(row => {
+      const actualRows = expenseRows.filter(r => {
+        if (!row.code) return false;
+        if (row.code.length < 6) return r._budgetCode.startsWith(row.code);
+        return r._budgetCode === row.code;
+      });
+      const actual = actualRows.reduce((s,r) => s + Number(r.amount || 0), 0);
+      const plan = budgetPlanForPeriod(row, period.from, period.to);
+      return { ...row, plan, actual, count: actualRows.length, diff: plan - actual };
+    });
+    const unmatchedBudgetRows = expenseRows.filter(r => !r._budgetCode || !FIN_BUDGET_PLAN_2026.some(b => r._budgetCode.startsWith(b.code) || b.code.startsWith(r._budgetCode)));
+    const plannedTotal = budgetRows.find(r => r.code === "2")?.plan || budgetRows.reduce((s,r)=>s+r.plan,0);
+    const budgetTotal = budgetRows.find(r => r.code === "2")?.actual || expenseRows.reduce((s,r)=>s+Number(r.amount||0),0);
+    const budgetTopRows = budgetRows.filter(r => r.level === 1 && r.actual > 0);
+    const budgetChartColors = ["#2563eb","#16a34a","#7c3aed","#d97706","#0891b2","#dc2626","#4f46e5","#059669"];
 
+    window._finReportFrom = reportFrom;
+    window._finReportTo = reportTo;
+    main.style.maxWidth = "none";
+    main.style.width = "100%";
     main.innerHTML = `
-    <div style="margin-bottom:20px">
-      <h1 style="margin:0 0 4px">📑 Санхүүгийн тайлан</h1>
-      <div style="font-size:12px;color:#667085">Financial Reports · Нэгтгэсэн санхүүгийн тойм</div>
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:20px">
+      <div>
+        <h1 style="margin:0 0 4px">📑 Санхүүгийн тайлан</h1>
+        <div style="font-size:12px;color:#667085">Financial Reports · ${period.label} · ${period.from} - ${period.to}</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:8px 10px">
+        <span style="font-size:12px;font-weight:800;color:#475569">Шүүлтүүр:</span>
+        <input type="date" class="input" value="${period.from}" style="width:150px;padding:7px 10px;font-size:13px" onchange="window._finReportFrom=this.value; fin_reports()">
+        <span style="color:#94a3b8">—</span>
+        <input type="date" class="input" value="${period.to}" style="width:150px;padding:7px 10px;font-size:13px" onchange="window._finReportTo=this.value; fin_reports()">
+      </div>
     </div>
 
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px">
@@ -987,32 +1291,107 @@ async function fin_reports() {
             <tr><td style="padding:6px 0;color:#667085">Нийт авлага</td><td style="text-align:right;font-weight:700;color:#7c3aed">${fmt(recvTotal)}₮</td></tr>
             <tr><td style="padding:6px 0;color:#667085">Авсан</td><td style="text-align:right;font-weight:700;color:#16a34a">${fmt(recvGot)}₮</td></tr>
           </table>
+      </div>
+    </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:minmax(720px, 820px) minmax(360px, 1fr);gap:16px;align-items:start;margin-bottom:20px;width:100%">
+    <div class="panel" style="margin-bottom:0">
+      <div style="padding:14px 18px;border-bottom:1px solid #e2e6ed;font-weight:700;font-size:14px">📘 Төсвийн гүйцэтгэлийн тайлан</div>
+      <div style="padding:16px 18px">
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:14px">
+          ${statCard("Батлагдсан төсөв", fmt(plannedTotal)+"₮", "#2563eb")}
+          ${statCard("Гүйцэтгэл", fmt(budgetTotal)+"₮", "#16a34a")}
+          ${statCard("Үлдэгдэл", fmt(plannedTotal-budgetTotal)+"₮", plannedTotal>=budgetTotal?"#7c3aed":"#dc2626")}
+        </div>
+        <div style="display:grid;grid-template-columns:minmax(0,1fr);gap:14px;align-items:stretch;margin-bottom:14px">
+          <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:14px">
+            <div style="font-size:12px;font-weight:900;color:#334155;margin-bottom:10px">Зардлын ангиллаар гүйцэтгэлд эзлэх хувь</div>
+            ${budgetTopRows.length ? budgetTopRows.map(r => {
+              const pct = budgetTotal ? Math.round(r.actual / budgetTotal * 100) : 0;
+              return `<div style="display:grid;grid-template-columns:minmax(180px,1fr) 3fr 86px;gap:10px;align-items:center;margin-bottom:8px">
+                <div style="font-size:11px;font-weight:800;color:#0f172a;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(r.name)}">${escapeHtml(r.name)}</div>
+                <div style="height:12px;background:#e2e8f0;border-radius:999px;overflow:hidden">
+                  <div style="width:${Math.min(pct,100)}%;height:100%;background:#2563eb;border-radius:999px"></div>
+                </div>
+                <div style="font-size:11px;font-weight:900;color:#2563eb;text-align:right">${fmt(r.actual)}₮</div>
+              </div>`;
+            }).join("") : `<div style="font-size:12px;color:#94a3b8;text-align:center;padding:12px">Зарлагын гүйцэтгэл бүртгэгдээгүй байна</div>`}
+          </div>
+        </div>
+        <div style="overflow:hidden;border:1px solid #e2e8f0;border-radius:10px">
+          <table style="width:100%;border-collapse:collapse;font-size:11px;table-layout:fixed">
+            <colgroup>
+              <col style="width:58px">
+              <col>
+              <col style="width:116px">
+              <col style="width:116px">
+              <col style="width:116px">
+              <col style="width:62px">
+              <col style="width:58px">
+            </colgroup>
+            <thead>
+              <tr style="background:#f8fafc;border-bottom:2px solid #e2e8f0">
+                <th style="padding:8px 8px;text-align:left;font-size:10px;color:#475569">КОД</th>
+                <th style="padding:8px 8px;text-align:left;font-size:10px;color:#475569">ТӨСВИЙН АНГИЛАЛ</th>
+                <th style="padding:8px 8px;text-align:right;font-size:10px;color:#475569">ТӨЛӨВЛӨГӨӨ</th>
+                <th style="padding:8px 8px;text-align:right;font-size:10px;color:#475569">ГҮЙЦЭТГЭЛ</th>
+                <th style="padding:8px 8px;text-align:right;font-size:10px;color:#475569">ЗӨРҮҮ</th>
+                <th style="padding:8px 8px;text-align:center;font-size:10px;color:#475569">%</th>
+                <th style="padding:8px 8px;text-align:center;font-size:10px;color:#475569">ГҮЙЛ.</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${budgetRows.length ? budgetRows.map(r => {
+                const pct = r.plan ? Math.round(r.actual / r.plan * 100) : (r.actual ? 100 : 0);
+                const isGroup = r.level <= 1;
+                return `<tr style="border-bottom:1px solid #f1f5f9;background:${isGroup ? "#f8fafc" : "#fff"}">
+                  <td style="padding:8px 8px;font-weight:800;color:#475569;white-space:nowrap">${escapeHtml(r.code)}</td>
+                  <td style="padding:8px 8px;font-weight:${isGroup ? 900 : 600};color:#0f172a;padding-left:${8 + r.level * 12}px;white-space:normal;line-height:1.25;word-break:break-word">${escapeHtml(r.name)}</td>
+                  <td style="padding:8px 8px;text-align:right;font-weight:800;color:#334155;white-space:nowrap">${fmt(r.plan)}₮</td>
+                  <td style="padding:8px 8px;text-align:right;font-weight:800;color:#16a34a;white-space:nowrap">${fmt(r.actual)}₮</td>
+                  <td style="padding:8px 8px;text-align:right;font-weight:800;color:${r.diff >= 0 ? "#2563eb" : "#dc2626"};white-space:nowrap">${fmt(r.diff)}₮</td>
+                  <td style="padding:8px 8px;text-align:center;white-space:nowrap">
+                    <span style="font-weight:800;color:${pct > 100 ? "#dc2626" : "#2563eb"}">${pct}%</span>
+                  </td>
+                  <td style="padding:8px 8px;text-align:center;color:#64748b;white-space:nowrap">${r.count}</td>
+                </tr>`;
+              }).join("") : `<tr><td colspan="7" style="text-align:center;padding:28px;color:#94a3b8">Төсвийн гүйцэтгэлийн зарлага бүртгэгдээгүй байна</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+        <div style="font-size:12px;color:#64748b;margin-top:10px;background:#f8fafc;border-radius:8px;padding:10px">
+          Энэ тайлан нь 2026 оны төсвийн сарын хуваарийг суурь болгож, сонгосон хугацаанд хамрагдсан саруудын төлөвлөгөөг бүтнээр нь бодно. Мөнгөн журналын <b>Зарлага</b> мөрүүдийг кодоор нь тааруулж харуулна.
+          ${unmatchedBudgetRows.length ? `<br><span style="color:#dc2626;font-weight:700">Анхаарах:</span> Код таараагүй ${unmatchedBudgetRows.length} зарлагын мөр байна.` : ""}
         </div>
       </div>
     </div>
-
-    <div class="panel" style="margin-bottom:20px">
-      <div style="padding:14px 18px;border-bottom:1px solid #e2e6ed;font-weight:700;font-size:14px">
-        👷 Цалингийн тойм —
-        <select style="font-size:13px;border:1px solid #e2e6ed;border-radius:6px;padding:2px 8px;margin-left:6px" onchange="window._frYear=this.value;frLoad()">
-          ${[2024,2025,2026,2027].map(y=>`<option ${y==yr?'selected':''}>${y}</option>`).join("")}
-        </select>
-        <select style="font-size:13px;border:1px solid #e2e6ed;border-radius:6px;padding:2px 8px;margin-left:4px" onchange="window._frMonth=this.value;frLoad()">
-          ${Array.from({length:12},(_,i)=>`<option value="${i+1}" ${i+1===mo?'selected':''}>${i+1}-р сар</option>`).join("")}
-        </select>
-      </div>
+    <div class="panel" style="margin-bottom:0;min-height:560px">
+      <div style="padding:14px 18px;border-bottom:1px solid #e2e6ed;font-weight:700;font-size:14px">◔ Ангилал тус бүрийн зардалд эзлэх хувь</div>
       <div style="padding:16px 18px">
-        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px">
-          ${statCard("Нийт олгох цалин", fmt(prNet)+"₮", "#0891b2")}
-          ${statCard("Тооцосон ажилтан", payrollRows.length+" хүн", "#7c3aed")}
-          ${statCard("Олгосон", payrollRows.filter(r=>r.status==='Олгосон').length+" хүн", "#16a34a")}
+        <div style="font-size:12px;color:#64748b;margin-bottom:14px">Нийт гүйцэтгэл ${fmt(budgetTotal)}₮ дотор эзлэх хувь</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px">
+          ${budgetTopRows.length ? budgetTopRows.map((r, idx) => {
+            const color = budgetChartColors[idx % budgetChartColors.length];
+            const pct = budgetTotal ? Math.round(r.actual / budgetTotal * 100) : 0;
+            return `<div style="border:1px solid #e2e8f0;border-radius:10px;background:#fff;padding:14px;display:grid;grid-template-columns:86px minmax(0,1fr);gap:12px;align-items:center;min-height:116px">
+              <div style="width:86px;height:86px;border-radius:50%;background:conic-gradient(${color} 0 ${Math.min(pct,100)}%, #e2e8f0 ${Math.min(pct,100)}% 100%);display:flex;align-items:center;justify-content:center">
+                <div style="width:58px;height:58px;border-radius:50%;background:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px #eef2f7">
+                  <div style="font-size:18px;font-weight:900;color:${color};line-height:1">${pct}%</div>
+                  <div style="font-size:9px;color:#94a3b8;font-weight:800">эзлэх</div>
+                </div>
+              </div>
+              <div style="min-width:0">
+                <div style="font-size:12px;font-weight:900;color:#0f172a;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden" title="${escapeHtml(r.name)}">${escapeHtml(r.name)}</div>
+                <div style="font-size:13px;font-weight:900;color:${color};margin-top:8px;white-space:nowrap">${fmt(r.actual)}₮</div>
+                <div style="font-size:11px;color:#64748b;margin-top:4px">${r.count} гүйлгээ</div>
+              </div>
+            </div>`;
+          }).join("") : `<div style="font-size:12px;color:#94a3b8;text-align:center;padding:32px;border:1px dashed #cbd5e1;border-radius:10px">Зарлагын гүйцэтгэл бүртгэгдээгүй байна</div>`}
         </div>
       </div>
+    </div>
     </div>`;
-
-    window._frYear  = yr;
-    window._frMonth = mo;
-    window.frLoad = () => { yr=Number(window._frYear); mo=Number(window._frMonth); load(); };
   }
   load();
 }
@@ -1034,6 +1413,7 @@ function openImportModal(tbl) {
   div.innerHTML = `<div style="background:#fff;border-radius:14px;padding:28px;width:600px;max-height:90vh;overflow:auto">
     <div style="font-size:16px;font-weight:800;margin-bottom:16px">📥 Excel Import</div>
     <div style="font-size:13px;color:#667085;margin-bottom:14px">Excel файл (.xlsx/.xls) оруулж баганы харгалзааг тохируулна уу. Эхний мөр толгой байх ёстой.</div>
+    ${["accounts_payable","accounts_receivable"].includes(tbl) ? importPeriodControls("imp") : ""}
     <input type="file" id="impFile" accept=".xlsx,.xls" style="margin-bottom:12px" onchange="parseImport('${tbl}')">
     <div id="impPreview"></div>
     <div id="impMapping" style="display:none;margin-top:14px">
@@ -1092,9 +1472,18 @@ window.commitImport = async (tbl) => {
     if (sel && sel.value !== "") mapping[f] = Number(sel.value);
   });
   try {
+    const y = Number(document.getElementById("impYear")?.value || today().slice(0, 4));
+    const m = Number(document.getElementById("impMonth")?.value || today().slice(5, 7));
     const r = await api("/api/finance-import/commit", {
       method:"POST",
-      body: JSON.stringify({ table: tbl, mapping, rows: data.data })
+      body: JSON.stringify({
+        table: tbl,
+        mapping,
+        rows: data.data,
+        target_year: y,
+        target_month: m,
+        target_date: `${y}-${String(m).padStart(2, "0")}-01`
+      })
     });
     toast(`${r.inserted} мөр амжилттай оруулав`);
     document.getElementById("importModal")?.remove();
@@ -1122,6 +1511,7 @@ function openSmartImport() {
       Нягтлангийн програмаас гаргасан Excel файл оруулна уу — төрлийг автоматаар таних болно.<br>
       <span style="font-size:12px">Дэмжигдэх: Мөнгөн хөрөнгийн журнал · Үндсэн хөрөнгө · Няравын тайлан · Авлага · Өглөг</span>
     </div>
+    ${importPeriodControls("si")}
     <div style="background:#f8fafc;border:2px dashed #e2e6ed;border-radius:10px;padding:24px;text-align:center;margin-bottom:16px">
       <input type="file" id="siFile" accept=".xlsx,.xls" style="display:none" onchange="siParseFile()">
       <div style="font-size:36px;margin-bottom:8px">📂</div>
@@ -1189,9 +1579,17 @@ window.siCommit = async () => {
   const btn = document.getElementById("siCommitBtn");
   btn.disabled = true; btn.textContent = "Оруулж байна...";
   try {
+    const y = Number(document.getElementById("siYear")?.value || today().slice(0, 4));
+    const m = Number(document.getElementById("siMonth")?.value || today().slice(5, 7));
     const r = await api("/api/smart-import/commit", {
       method: "POST",
-      body: JSON.stringify({ type: d.type, data: d.data })
+      body: JSON.stringify({
+        type: d.type,
+        data: d.data,
+        target_year: y,
+        target_month: m,
+        target_date: `${y}-${String(m).padStart(2, "0")}-01`
+      })
     });
     const msg = `✅ ${r.inserted} мөр нэмэгдсэн` +
       (r.skipped ? `, ${r.skipped} шинэчлэгдсэн` : "") +
@@ -1212,7 +1610,7 @@ window.siCommit = async () => {
 };
 
 Object.assign(window, {
+  finance, finOpen,
   fin_dashboard, cash_journal, payables, receivables,
   fixed_ledger, payroll, fin_reports, openImportModal, openSmartImport
 });
-

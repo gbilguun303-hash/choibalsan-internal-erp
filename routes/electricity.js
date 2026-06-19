@@ -58,13 +58,13 @@ function extractMeta(text) {
       const iMonth = parseInt(inv[2]);
       if (!billing_year  && iYear  >= 2020) billing_year  = iYear;
       if (!billing_month && iMonth >= 1 && iMonth <= 12)
-        billing_month = iMonth === 1 ? 1 : iMonth - 1;
+        billing_month = iMonth;
     }
   }
 
-  // last number > 1,000,000
+  // last comma-formatted number > 1,000,000 in the invoice text (e.g. 28,653,630.63)
   let total_amount = 0;
-  for (const m of [...text.matchAll(/([\d ][\d ]{4,}\.[\d]{2})/g)]) {
+  for (const m of [...text.matchAll(/\b(\d{1,3}(?:,\d{3})+\.\d{2})\b/g)]) {
     const v = pNum(m[1]);
     if (v > 1000000) total_amount = v;
   }
@@ -98,7 +98,10 @@ function splitHeader(header) {
     location = tokens.slice(1).join(" ");
   }
 
-  return { meter_no: meter_no.trim(), location: location.trim() };
+  const loc = location.trim();
+  // PDF-ээс зөвхөн тоо (тоо хэмжээ, дарааллын дугаар) location-д орвол хоосон болгоно
+  const locClean = /^\d+$/.test(loc) ? "" : loc;
+  return { meter_no: meter_no.trim(), location: locClean };
 }
 
 function parsePDFRows(text) {
@@ -106,14 +109,14 @@ function parsePDFRows(text) {
   let seq = 0;
 
   // Split on row-type markers
-  const parts = text.split(/(Өдөр|Шөнө|Энгийн\s+тарифаар)/);
+  const parts = text.split(/(Өдөр|Шөнө|Энгийн\s+тарифаар|Тариф\s+1\s*\([^)]*\))/);
 
-  // 5-num METERED: header prev curr diff 1.000 kwh 241.00 amount
-  const re5 = /^(.*?)\s+(\d+\.\d{4})\s+(\d+\.\d{4})\s+(\d+\.\d{4})\s+1\.000\s+(\d+\.\d{3})\s+241\.00\s+([\d ]+\.\d{2})/;
-  // 4-num METERED (*K* type): header prev curr 1.000 kwh 241.00 amount
-  const re4 = /^(.*?)\s+(\d+\.\d{4})\s+(\d+\.\d{4})\s+1\.000\s+(\d+\.\d{3})\s+241\.00\s+([\d ]+\.\d{2})/;
-  // FIXED (Энгийн тарифаар): header n1 n2 n3 n4 15500.00 amount
-  const reF = /^(.*?)\s+(\d+\.\d{4})\s+(\d+\.\d{4})\s+(\d+\.\d{3})\s+(\d+\.\d{3})\s+15500\.00\s+([\d ]+\.\d{2})/;
+  // 5-num METERED: header prev curr diff 1.000 kwh 241 amount  (commas allowed as thousands sep)
+  const re5 = /^(.*?)\s+([\d,]+\.\d{1,4})\s+([\d,]+\.\d{1,4})\s+([\d,]+\.\d{1,4})\s+1\.0+\s+([\d,]+\.\d{1,4})\s+241(?:\.0+)?\s+([\d, ]+\.\d{2})/;
+  // 4-num METERED (*K* type): header prev curr 1.000 kwh 241 amount
+  const re4 = /^(.*?)\s+([\d,]+\.\d{1,4})\s+([\d,]+\.\d{1,4})\s+1\.0+\s+([\d,]+\.\d{1,4})\s+241(?:\.0+)?\s+([\d, ]+\.\d{2})/;
+  // FIXED (Энгийн тарифаар): header n1 n2 n3 n4 15500 amount
+  const reF = /^(.*?)\s+([\d,]+\.\d{1,4})\s+([\d,]+\.\d{1,4})\s+([\d,]+\.\d{1,4})\s+([\d,]+\.\d{1,4})\s+15500(?:\.0+)?\s+([\d, ]+\.\d{2})/;
 
   for (let i = 1; i < parts.length; i += 2) {
     const typeToken = parts[i].trim();
@@ -244,11 +247,11 @@ async function runChecks(normRows, seqMap, year, month) {
     }
 
     // C: TRANSFERRED_BUT_BILLED
-    if (mp.status === "TRANSFERRED") {
+    if (mp.status === "TRANSFERRED" || mp.owner_status === "TRANSFERRED") {
       checks.push({
         check_code: "TRANSFERRED_BUT_BILLED", check_name: "Шилжүүлсэн боловч тооцсон",
         severity: "WARNING",
-        message: `Тоолуур ${row.meter_no} шилжүүлэгдсэн боловч тооцоонд орсон`,
+        message: `Тоолуур ${row.meter_no} шилжүүлсэн төлөвтэй боловч тооцоонд орсон`,
         meter_no: row.meter_no
       });
     }
@@ -342,7 +345,7 @@ router.get("/el-summary", auth, async (req, res) => {
 // ── Meter Points CRUD ────────────────────────────────────────────
 router.get("/mp", auth, async (req, res) => {
   try {
-    res.json(await all("SELECT * FROM meter_points ORDER BY status, meter_no"));
+    res.json(await all("SELECT * FROM meter_points WHERE status != 'REMOVED' ORDER BY status, meter_no"));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -386,6 +389,22 @@ router.put("/mp/:id/panel", auth, requirePermission("meter_write"), async (req, 
       panel_asset_id ? `panel_asset_id=${panel_asset_id}` : "panel unlinked");
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── PUT /api/mp/bulk-delete — soft-delete multiple meters ────────
+router.put("/mp/bulk-delete", auth, requirePermission("meter_write"), async (req, res) => {
+  const { ids } = req.body;
+  if (!Array.isArray(ids) || !ids.length)
+    return res.status(400).json({ error: "Мэдээлэл дутуу" });
+  for (const id of ids) {
+    await run(
+      "UPDATE meter_points SET status='REMOVED',updated_at=CURRENT_TIMESTAMP WHERE id=?",
+      [id]
+    );
+  }
+  await audit(req.user.id, "BULK_DELETE", "meter_points", null,
+    `${ids.length} тоолуур устгагдлаа`);
+  res.json({ ok: true, deleted: ids.length });
 });
 
 // ── PUT /api/mp/bulk-verify must be BEFORE /mp/:id to avoid route collision ───
@@ -444,8 +463,9 @@ router.post("/mp/bootstrap", auth, requirePermission("meter_write"), upload.arra
         }
         const e = meterMap.get(r.meter_no);
         e.freq++;
-        // prefer the non-empty location
-        if (!e.location && r.location) e.location = r.location;
+        // prefer a real location over an empty or numeric-only one
+        const isNumeric = loc => /^\d*$/.test(loc || "");
+        if (isNumeric(e.location) && !isNumeric(r.location) && r.location) e.location = r.location;
       }
     } finally {
       fs.unlink(file.path, () => {});
@@ -454,7 +474,7 @@ router.post("/mp/bootstrap", auth, requirePermission("meter_write"), upload.arra
 
   let created = 0, already = 0;
   for (const [meter_no, info] of meterMap) {
-    const ex = await get("SELECT id FROM meter_points WHERE meter_no=?", [meter_no]);
+    const ex = await get("SELECT id FROM meter_points WHERE meter_no=? AND status != 'REMOVED'", [meter_no]);
     if (!ex) {
       await run(
         `INSERT INTO meter_points(meter_no,location,owner_status,status,verified,auto_created,created_by)
@@ -467,9 +487,26 @@ router.post("/mp/bootstrap", auth, requirePermission("meter_write"), upload.arra
     }
   }
 
+  // Аль хэдийн байгаа UNKNOWN мөрийн location нь тоо бол шинэ сайн location-оор шинэчлэх
+  let locationFixed = 0;
+  for (const [meter_no, info] of meterMap) {
+    if (!info.location || /^\d*$/.test(info.location)) continue;
+    const ex = await get(
+      "SELECT id, location FROM meter_points WHERE meter_no=? AND owner_status='UNKNOWN'",
+      [meter_no]
+    );
+    if (ex && /^\d*$/.test(ex.location || "")) {
+      await run(
+        "UPDATE meter_points SET location=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+        [info.location, ex.id]
+      );
+      locationFixed++;
+    }
+  }
+
   await audit(req.user.id, "BOOTSTRAP", "meter_points", null,
-    `${created} шинэ draft, ${already} аль хэдийн байсан`);
-  res.json({ ok: true, created, already, total: meterMap.size });
+    `${created} шинэ draft, ${already} аль хэдийн байсан, ${locationFixed} байршил засагдлаа`);
+  res.json({ ok: true, created, already, total: meterMap.size, locationFixed });
 });
 
 
@@ -502,6 +539,24 @@ router.put("/eb/:id/status", auth, requirePermission("finance_write"), async (re
     await run("UPDATE electricity_bill_imports SET status=?,notes=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
       [status, notes||"", req.params.id]);
     await audit(req.user.id, "STATUS", "electricity_bill_imports", req.params.id, status);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── PUT /eb/:id/pay — record payment ─────────────────────────────
+router.put("/eb/:id/pay", auth, requirePermission("finance_write"), async (req, res) => {
+  const { paid_at, paid_amount, payment_ref } = req.body;
+  if (!paid_at) return res.status(400).json({ error: "Төлсөн огноо шаардлагатай" });
+  try {
+    const bill = await get("SELECT * FROM electricity_bill_imports WHERE id=?", [req.params.id]);
+    if (!bill) return res.status(404).json({ error: "Олдсонгүй" });
+    await run(
+      `UPDATE electricity_bill_imports
+       SET paid_at=?, paid_amount=?, payment_ref=?, paid_by=?, status='paid', updated_at=CURRENT_TIMESTAMP
+       WHERE id=?`,
+      [paid_at, paid_amount || bill.our_amount, payment_ref || null, req.user.id, req.params.id]);
+    await audit(req.user.id, "PAY", "electricity_bill_imports", req.params.id,
+      `${bill.billing_year}-${String(bill.billing_month).padStart(2,"0")} · ${paid_at}`);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

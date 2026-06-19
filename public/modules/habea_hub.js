@@ -9,9 +9,10 @@ let _activeTab = 'dashboard';
 export async function habea_hub(tab) {
   if (tab) _activeTab = tab;
   if (_activeTab === 'records') {
-    // Render safety module into main, then inject tab bar on top
+    // Render the full safety module, but open the operational risk list first.
     if (typeof window.safety === 'function') {
       await window.safety();
+      if (typeof window.hseTab === 'function') await window.hseTab('risks');
       _injectTabBar('records');
     }
     return;
@@ -55,10 +56,74 @@ async function _load() {
   } catch { _works = []; _risks = []; }
 }
 
+// ── Role guide ────────────────────────────────────────────────
+
+function _roleGuide() {
+  const key = 'habea';
+  const collapsed = localStorage.getItem('roleGuide_' + key) === '1';
+  return `
+  <div style="background:#fff;border:1px solid #ede9fe;border-left:4px solid #7c3aed;border-radius:12px;margin:0 0 0 0;overflow:hidden">
+    <div onclick="window._toggleRoleGuide('${key}')" style="padding:11px 16px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;background:#faf5ff;user-select:none">
+      <div style="display:flex;align-items:center;gap:10px">
+        <span style="font-size:18px">🦺</span>
+        <div>
+          <div style="font-size:13px;font-weight:800;color:#4c1d95">ХАБЭА Инженер — Ажлын байрны тодорхойлолт</div>
+          <div style="font-size:10px;color:#7c3aed;margin-top:1px">Аюулгүй ажиллагааны инженерийн үүрэг, хариуцлага</div>
+        </div>
+      </div>
+      <span id="rg_arr_${key}" style="color:#64748b;font-size:11px;font-weight:700">${collapsed ? '▼ Харуулах' : '▲ Нуух'}</span>
+    </div>
+    <div id="rg_body_${key}" style="display:${collapsed ? 'none' : ''};padding:14px 16px;border-top:1px solid #ede9fe">
+
+      <div style="margin-bottom:12px">
+        <div style="font-size:10px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">WORKFLOW — ТАНЫ ҮҮРЭГ ХААНА БАЙДАГ ВЭ</div>
+        <div style="display:flex;align-items:center;gap:3px;flex-wrap:wrap;font-size:11px">
+          <span style="padding:4px 10px;border-radius:6px;background:#f1f5f9;color:#64748b">📋 Ажил үүсгэх</span>
+          <span style="color:#cbd5e1">→</span>
+          <span style="padding:4px 10px;border-radius:6px;background:#7c3aed;color:#fff;font-weight:800">🔐 PTW ЗӨВШӨӨРӨХ</span>
+          <span style="color:#cbd5e1">→</span>
+          <span style="padding:4px 10px;border-radius:6px;background:#eff6ff;color:#2563eb">⚙️ Гүйцэтгэл</span>
+          <span style="color:#cbd5e1">→</span>
+          <span style="padding:4px 10px;border-radius:6px;background:#fefce8;color:#ca8a04">📬 Дуусгаж илгээх</span>
+          <span style="color:#cbd5e1">→</span>
+          <span style="padding:4px 10px;border-radius:6px;background:#7c3aed;color:#fff;font-weight:800">🦺 ТАНЫ ШАЛГАЛТ</span>
+          <span style="color:#cbd5e1">→</span>
+          <span style="padding:4px 10px;border-radius:6px;background:#dbeafe;color:#1e40af">⏳ Ерөнхий инженер</span>
+          <span style="color:#cbd5e1">→</span>
+          <span style="padding:4px 10px;border-radius:6px;background:#f0fdf4;color:#16a34a">✅ Хаагдсан</span>
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:11px">
+        <div style="background:#f8fafc;border-radius:8px;padding:10px 12px">
+          <div style="font-weight:800;color:#1e293b;margin-bottom:6px">✅ Таны хийх зүйл</div>
+          <div style="color:#475569;line-height:1.8">
+            • Ажил эхлэхийн өмнө <b>PTW зөвшөөрөл</b> олгох<br>
+            • Эрсдэлийг тодорхойлж, арга хэмжээ заах<br>
+            • Ажил дууссаны дараа <b>талбайн шалгалт</b> хийх<br>
+            • Дуусгалтын дүгнэлт бичиж ерөнхий инженерт илгээх<br>
+            • Эрсдэл бүртгэх, дэвшилтэт арга хэмжээ хяналт тавих<br>
+            • Техникийн хэрэгслийн өдөр/сарын үзлэг хийх
+          </div>
+        </div>
+        <div style="background:#fdf4ff;border-radius:8px;padding:10px 12px;border:1px solid #e9d5ff">
+          <div style="font-weight:800;color:#581c87;margin-bottom:6px">📋 Сануулга</div>
+          <div style="color:#6b21a8;line-height:1.8">
+            • PTW <b>олгоогүй</b> ажилд зөвшөөрөлгүй орж болохгүй<br>
+            • Шалгалтын дүгнэлтийг <b>дэлгэрэнгүй</b> бичих<br>
+            • Өндөр эрсдэлтэй ажлыг ерөнхий инженерт мэдэгдэх<br>
+            • Сарын эцэст тайлан хадгалах
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
 // ── Render ────────────────────────────────────────────────────
 
 function _render() {
-  const pendingPost  = _works.filter(w => w.status === 'Инженер баталсан');
+  const pendingPost  = _works.filter(w => w.status === 'Дууссан гэж илгээсэн');
   const needsPre     = _works.filter(w =>
     ['Явцтай','Эхэлсэн'].includes(w.status) && w.habea_pre_status !== 'approved');
   const preApproved  = _works.filter(w =>
@@ -73,7 +138,7 @@ function _render() {
   const urgentBanner = pendingPost.length ? `
     <div style="display:flex;align-items:center;gap:12px;padding:11px 28px;background:#dc2626;color:#fff;font-size:13px;font-weight:800">
       <span style="font-size:18px">🚨</span>
-      <span>${pendingPost.length} ажил таны ХАБЭА батлалтыг яаралтай хүлээж байна!</span>
+      <span>${pendingPost.length} ажил таны ХАБЭА дуусгалтын шалгалтыг яаралтай хүлээж байна!</span>
       <span style="margin-left:auto;font-size:11px;font-weight:400;opacity:.85">↓ доорх жагсаалтаас харна уу</span>
     </div>` : '';
 
@@ -91,6 +156,9 @@ function _render() {
     _tabBarHtml('dashboard') +
     urgentBanner +
   `<div style="background:#f5f3ff;min-height:100vh">
+    <div style="max-width:1400px;margin:0 auto;padding:16px 28px 0">
+      ${_roleGuide()}
+    </div>
 
     <!-- ─── Hero Header ─────────────────────────────────────── -->
     <div style="background:linear-gradient(145deg,#3b0764,#5b21b6,#7c3aed);padding:24px 28px 36px">
@@ -111,7 +179,7 @@ function _render() {
           </button>
         </div>
         <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px">
-          ${hkpi('⏳', pendingPost.length, 'БАТЛАЛ ХҮЛЭЭЖ БУЙ',   pendingPost.length ? '⚡ Яаралтай шийдвэрлэнэ үү' : 'Дуусгасан байна ✓', true)}
+          ${hkpi('⏳', pendingPost.length, 'ШАЛГАЛТ ХҮЛЭЭЖ БУЙ',   pendingPost.length ? '⚡ Яаралтай шалгана уу' : 'Дуусгасан байна ✓', true)}
           ${hkpi('🔐', needsPre.length,    'ЭХЛЭЛТ ЗӨВШӨӨРӨХ',    needsPre.length ? 'Pre-approval дутуу ажлууд' : 'Бүх ажил зөвшөөрөлтэй ✓')}
           ${hkpi('⚠️', openRisks.length,   'НЭЭЛТТЭЙ ЭРСДЭЛ',     `Шүүмжлэлтэй: ${critRisks.length} · Шинэ: ${newRisks.length}`)}
           ${hkpi('✅', doneThisM,           'САРЫН ХААГДСАН',       `${thisM} · Хяналтанд: ${preApproved.length}`)}
@@ -128,14 +196,14 @@ function _render() {
           <div style="display:flex;align-items:center;gap:10px">
             <div style="width:34px;height:34px;background:linear-gradient(135deg,#6d28d9,#7c3aed);border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:16px;box-shadow:0 2px 8px rgba(124,58,237,.35)">⏳</div>
             <div>
-              <div style="font-size:13px;font-weight:800;color:#4c1d95">Дуусгалтын батлал шаардлагатай</div>
-              <div style="font-size:10px;color:#7c3aed;margin-top:1px">Ерөнхий инженер баталсан — ХАБЭА-н шийдвэр хүлээж байна</div>
+              <div style="font-size:13px;font-weight:800;color:#4c1d95">Дуусгалтын шалгалт шаардлагатай</div>
+              <div style="font-size:10px;color:#7c3aed;margin-top:1px">Ажил дуусгаж илгээсэн — ХАБЭА-н дүгнэлт хүлээж байна</div>
             </div>
           </div>
           <span style="min-width:28px;height:28px;display:flex;align-items:center;justify-content:center;border-radius:50%;font-size:13px;font-weight:900;background:${pendingPost.length?'#7c3aed':'#dcfce7'};color:${pendingPost.length?'#fff':'#16a34a'}">${pendingPost.length}</span>
         </div>
         <div style="max-height:360px;overflow-y:auto">
-          ${pendingPost.length ? pendingPost.map(_pendingPostCard).join('') : _emptyState('⏳', 'Батлал хүлээж буй ажил байхгүй', 'Бүх дуусгалт батлагдсан байна ✓', '#16a34a')}
+          ${pendingPost.length ? pendingPost.map(_pendingPostCard).join('') : _emptyState('⏳', 'Шалгалт хүлээж буй ажил байхгүй', 'Бүх дуусгалт шалгагдсан байна ✓', '#16a34a')}
         </div>
       </div>
 
@@ -211,7 +279,7 @@ function _render() {
 
 function _pendingPostCard(w) {
   const prog = w.progress || 0;
-  const confDate = (w.confirmed_at||'').slice(0,10);
+  const submittedDate = (w.updated_at || w.work_date || '').slice(0,10);
   return `<div onclick="habeaHubOpenDetail(${w.id})"
     style="padding:14px 20px;border-bottom:1px solid #f3f0ff;cursor:pointer;transition:all .15s;border-left:3px solid transparent"
     onmouseover="this.style.background='#faf5ff';this.style.borderLeftColor='#7c3aed'"
@@ -222,8 +290,8 @@ function _pendingPostCard(w) {
         <div style="font-size:13px;font-weight:700;color:#1e293b;margin-bottom:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escH(w.title)}</div>
         <div style="font-size:11px;color:#64748b;margin-bottom:6px">${escH(w.location||'—')} · <span style="color:#94a3b8">${escH(w.category||'—')}</span></div>
         <div style="display:flex;align-items:center;gap:8px">
-          <span style="font-size:10px;padding:2px 10px;border-radius:20px;background:#ede9fe;color:#7c3aed;font-weight:700">🔧 ${escH(w.confirmed_name||'—')}</span>
-          <span style="font-size:10px;color:#94a3b8">${confDate}</span>
+          <span style="font-size:10px;padding:2px 10px;border-radius:20px;background:#ede9fe;color:#7c3aed;font-weight:700">📬 Дуусгаж илгээсэн</span>
+          <span style="font-size:10px;color:#94a3b8">${submittedDate}</span>
         </div>
         <div style="margin-top:8px;height:4px;background:#f1f5f9;border-radius:4px;overflow:hidden">
           <div style="height:100%;width:${prog}%;background:linear-gradient(90deg,#7c3aed,#a78bfa);border-radius:4px"></div>
@@ -320,7 +388,7 @@ export async function habeaHubOpenDetail(id) {
   const warns = [];
   if (!execs.length)
     warns.push({ level:'error', msg:'Гүйцэтгэлийн бүртгэл огт байхгүй — ажил хийгдсэн эсэх нь тодорхойгүй!' });
-  else if (execs.every(e => !(e.description||'').trim()))
+  else if (execs.every(e => !(e.note||'').trim()))
     warns.push({ level:'warn', msg:'Гүйцэтгэлийн бүртгэлд тайлбар байхгүй байна' });
 
   const totalPhotos = execs.reduce((s,e) => s+(e.photo_count||0), 0) + (w.photo_count||0);
@@ -348,10 +416,10 @@ export async function habeaHubOpenDetail(id) {
   const execHtml = execs.length
     ? execs.map(e=>`<div style="padding:6px 10px;background:#f8fafc;border-radius:6px;font-size:11px;margin-bottom:4px;border-left:3px solid ${e.photo_count>0?'#86efac':'#93c5fd'}">
         <div style="display:flex;justify-content:space-between">
-          <div style="font-weight:600;color:#1e293b">${escH(e.exec_date||'')} · ${escH(e.worker_name||e.worker_names||'—')}</div>
+          <div style="font-weight:600;color:#1e293b">${escH(e.start_date||'')} → ${escH(e.end_date||'')} · ${escH(e.workers||'—')}</div>
           <span style="font-size:10px;color:${e.photo_count>0?'#16a34a':'#f59e0b'}">📷 ${e.photo_count||0}</span>
         </div>
-        <div style="color:${(e.description||'').trim()?'#475569':'#f59e0b'};margin-top:2px">${escH(e.description||'— тайлбар байхгүй')}</div>
+        <div style="color:${(e.note||'').trim()?'#475569':'#f59e0b'};margin-top:2px">${escH(e.note||'— тайлбар байхгүй')}</div>
       </div>`).join('')
     : `<div style="font-size:11px;color:#dc2626;font-weight:600;padding:8px 10px;background:#fff1f2;border-radius:6px">🔴 Гүйцэтгэлийн бүртгэл байхгүй</div>`;
 
@@ -392,13 +460,6 @@ export async function habeaHubOpenDetail(id) {
         ${w.description ? row('Тайлбар', escH(w.description)) : ''}
       </div>
 
-      <!-- Chief engineer approval -->
-      ${w.confirmed_name ? `<div style="margin-bottom:14px;padding:10px 14px;background:#f5f3ff;border-radius:10px;border-left:4px solid #7c3aed">
-        <div style="font-size:10px;font-weight:700;color:#7c3aed;margin-bottom:4px">🔧 ЕРӨНХИЙ ИНЖЕНЕРИЙН БАТЛАЛ</div>
-        <div style="font-size:12px;color:#1e293b;font-weight:600">${escH(w.confirmed_name)} · ${(w.confirmed_at||'').slice(0,16)}</div>
-        ${w.confirm_note ? `<div style="font-size:12px;color:#374151;margin-top:4px;font-style:italic">"${escH(w.confirm_note)}"</div>` : ''}
-      </div>` : ''}
-
       <!-- Executions -->
       <div style="margin-bottom:14px">
         <div style="font-size:11px;font-weight:700;color:#374151;margin-bottom:6px;text-transform:uppercase;letter-spacing:.05em">📋 Гүйцэтгэлийн бүртгэл (${execs.length})</div>
@@ -421,7 +482,7 @@ export async function habeaHubOpenDetail(id) {
       <div style="border-top:2px solid #f1f5f9;margin:16px 0"></div>
 
       <!-- ХАБЭА approval form -->
-      <div style="font-size:13px;font-weight:800;color:#1e293b;margin-bottom:10px">🦺 ХАБЭА-н шийдвэр</div>
+      <div style="font-size:13px;font-weight:800;color:#1e293b;margin-bottom:10px">🦺 ХАБЭА-н дуусгалтын дүгнэлт</div>
       <label style="font-size:11px;color:#7c3aed;font-weight:700;display:block;margin-bottom:4px">
         Шалгалтын дүгнэлт <span style="color:#dc2626">*</span>
       </label>
@@ -432,7 +493,7 @@ export async function habeaHubOpenDetail(id) {
 
       <div style="display:flex;gap:8px">
         <button onclick="habeaHubDoPost(${id})"
-          style="flex:2;padding:11px;border-radius:9px;border:none;background:#7c3aed;color:#fff;cursor:pointer;font-size:14px;font-weight:800">🦺 Аюулгүй — Ажил хаах</button>
+          style="flex:2;padding:11px;border-radius:9px;border:none;background:#7c3aed;color:#fff;cursor:pointer;font-size:14px;font-weight:800">🦺 Шалгасан — Ерөнхий инженерт илгээх</button>
         <button onclick="habeaHubDoReject(${id})"
           style="flex:1;padding:11px;border-radius:9px;border:none;background:#fee2e2;color:#dc2626;cursor:pointer;font-size:13px;font-weight:700">↩ Буцаах</button>
       </div>
@@ -491,9 +552,8 @@ export async function habeaHubDoPost(id) {
   try {
     await api(`/api/work-logs/${id}/habea-post`, { method:'POST', body:JSON.stringify({ note }) });
     document.getElementById('habeaHubModal').style.display = 'none';
-    toast('🦺 ХАБЭА батлагдсан — Ажил амжилттай хаагдлаа ✓');
+    toast('🦺 ХАБЭА шалгалаа — Ерөнхий инженерийн эцсийн батлал хүлээж байна');
     await _load(); _render();
-    printApprovalSheet(id);
   } catch(e) { toast('Алдаа: ' + e.message); }
 }
 
@@ -545,6 +605,15 @@ Object.assign(window, {
   habea_hub,
   habeaHubOpenDetail, habeaHubOpenPre,
   habeaHubDoPost, habeaHubDoReject, habeaHubDoPre,
+  _toggleRoleGuide(key) {
+    const el = document.getElementById('rg_body_' + key);
+    if (!el) return;
+    const nowHidden = el.style.display === 'none';
+    el.style.display = nowHidden ? '' : 'none';
+    const arr = document.getElementById('rg_arr_' + key);
+    if (arr) arr.textContent = nowHidden ? '▲ Нуух' : '▼ Харуулах';
+    localStorage.setItem('roleGuide_' + key, nowHidden ? '0' : '1');
+  },
 });
 
 // Keep backward compat — show('safety') still works for other modules

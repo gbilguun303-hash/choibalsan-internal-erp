@@ -221,7 +221,7 @@ router.get("/vehicle-repairs", auth, async (req, res) => {
   res.json(rows);
 });
 
-router.post("/vehicle-repairs", auth, requirePermission("vehicle_write"), async (req, res) => {
+router.post("/vehicle-repairs", auth, requirePermission("vehicle_repair"), async (req, res) => {
   const b = req.body;
   if (!b.vehicle_id || !b.repair_date || !b.repair_type) return res.status(400).json({ error: "Шаардлагатай талбарууд дутуу" });
   const r = await run(
@@ -239,7 +239,7 @@ router.post("/vehicle-repairs", auth, requirePermission("vehicle_write"), async 
   res.json({ id: r.id });
 });
 
-router.patch("/vehicle-repairs/:id/status", auth, async (req, res) => {
+router.patch("/vehicle-repairs/:id/status", auth, requirePermission("vehicle_repair"), async (req, res) => {
   const { repair_status, vehicle_id } = req.body;
   await run("UPDATE vehicle_repairs SET repair_status=? WHERE id=?", [repair_status, req.params.id]);
   if (repair_status === "Дууссан" && vehicle_id) {
@@ -249,7 +249,7 @@ router.patch("/vehicle-repairs/:id/status", auth, async (req, res) => {
   res.json({ ok: true });
 });
 
-router.delete("/vehicle-repairs/:id", auth, requireRole("director"), async (req, res) => {
+router.delete("/vehicle-repairs/:id", auth, requirePermission("vehicle_repair"), async (req, res) => {
   await run("DELETE FROM vehicle_repairs WHERE id=?", [req.params.id]);
   res.json({ ok: true });
 });

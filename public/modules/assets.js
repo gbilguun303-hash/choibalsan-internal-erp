@@ -16,7 +16,32 @@ const ASSET_CATEGORIES = [
 ];
 
 const ASSET_CONDITIONS = ["Хэвийн","Засвар хэрэгтэй","Хугацаа дууссан","Ашиглалтаас гарсан"];
+const CAMERA_CONDITIONS = ["Засварлах","Хэвийн","Татан буулгах","Нүүлгэх"];
 const ASSET_STATUSES   = ["Идэвхтэй","Идэвхгүй","Засварт","Нөөцөд"];
+let _cameraAssetTab = "dashboard";
+let _cameraAssetSearch = "";
+let _cameraAssetBagFilter = "";
+let _cameraConditionFilter = "";
+let _fiberMap = null;
+let _fiberRoutes = [];
+let _fiberDrawMode = false;
+let _fiberDrawPoints = [];
+let _fiberDrawLayer = null;
+let _fiberGpsPickAssetId = "";
+let _fiberGpsRows = [];
+let _fiberCameraMoveMode = false;
+let _fiberCameraMarkers = [];
+let _fiberCameraLayerVisible = true;
+
+const FIBER_CORE_OPTIONS = [
+  { core: 4, color: "#16a34a" },
+  { core: 6, color: "#0ea5e9" },
+  { core: 8, color: "#6366f1" },
+  { core: 12, color: "#f59e0b" },
+  { core: 24, color: "#ef4444" },
+  { core: 48, color: "#7c3aed" },
+  { core: 96, color: "#111827" },
+];
 
 const GER_CAT_MAP = {
   "Гэр хорооллын гэрэл": "Гэр хороолол",
@@ -25,6 +50,7 @@ const GER_CAT_MAP = {
 
 function gerSummaryBar(cat, rows, faultMap) {
   const totalCount  = rows.reduce((s,r) => s + (r.total_count||0), 0);
+  const needsPoles  = rows.reduce((s,r) => s + (r.needs_poles||0), 0);
   const totalBroken = faultMap
     ? rows.reduce((s,r) => { const f = faultMap.get(r.id); return s + (f ? f.broken_count : 0); }, 0)
     : rows.reduce((s,r) => s + (r.last_broken||0), 0);
@@ -49,6 +75,10 @@ function gerSummaryBar(cat, rows, faultMap) {
         <div style="font-size:20px;font-weight:800;color:#d97706">${totalCount}</div>
         <div style="font-size:11px;color:#64748b">Нийт толгой</div>
       </div>
+      ${needsPoles > 0 ? `<div style="background:#fff7ed;border-radius:8px;padding:8px 16px;text-align:center;min-width:90px">
+        <div style="font-size:20px;font-weight:800;color:#d97706">${needsPoles}</div>
+        <div style="font-size:11px;color:#64748b">Дутуу шон</div>
+      </div>` : ""}
       ${asaltBox}
     </div>`;
   }
@@ -61,6 +91,10 @@ function gerSummaryBar(cat, rows, faultMap) {
       <div style="font-size:20px;font-weight:800;color:#2563eb">${totalCount}</div>
       <div style="font-size:11px;color:#64748b">Нийт шон</div>
     </div>
+    ${needsPoles > 0 ? `<div style="background:#fff7ed;border-radius:8px;padding:8px 16px;text-align:center;min-width:90px">
+      <div style="font-size:20px;font-weight:800;color:#d97706">${needsPoles}</div>
+      <div style="font-size:11px;color:#64748b">Дутуу шон</div>
+    </div>` : ""}
     ${asaltBox}
   </div>`;
 }
@@ -142,6 +176,80 @@ function trafficSummaryBar(rows) {
   </div>`;
 }
 
+function refreshAssetView(category) {
+  if (category === "Камер" && window._cameraAssetMode) camera_assets();
+  else assets(category);
+}
+
+function cameraCountOf(asset) {
+  const direct = Number(asset?.camera_count || 0);
+  if (direct > 0) return direct;
+  const spec = String(asset?.specs || asset?.description || "");
+  const m = spec.match(/(\d+)\s*(?:ш|ширхэг|camera|камер)/i);
+  return m ? Number(m[1]) : 1;
+}
+
+function cameraBrokenCountOf(asset) {
+  return Math.max(0, Number(asset?.camera_broken_count || 0));
+}
+
+function cameraConditionOf(asset) {
+  const condition = String(asset?.condition || "").trim();
+  if (condition === "Засвар хэрэгтэй" || condition === "Засварт") return "Засварлах";
+  return CAMERA_CONDITIONS.includes(condition) ? condition : "Хэвийн";
+}
+
+async function updateCameraCounts(id, cameraCount, brokenCount, status = null) {
+  const total = Math.max(1, Number(cameraCount || 1));
+  const nextStatus = status === "Идэвхгүй" ? "Идэвхгүй" : "Идэвхтэй";
+  const broken = nextStatus === "Идэвхгүй" ? total : Math.max(0, Math.min(total, Number(brokenCount || 0)));
+  try {
+    await api(`/api/assets/${id}/camera-counts`, {
+      method: "PATCH",
+      body: JSON.stringify({ camera_count: total, camera_broken_count: broken, status: nextStatus })
+    });
+    toast("Камерын тоо шинэчлэгдлээ ✓");
+    camera_assets();
+  } catch(e) {
+    toast("Алдаа: " + e.message);
+  }
+}
+
+function cameraConditionFilter(val) {
+  _cameraConditionFilter = String(val || "");
+  camera_assets();
+}
+
+async function updateCameraBag(id, bagNo) {
+  const nextBag = bagNo ? String(bagNo) : "";
+  try {
+    await api(`/api/assets/${id}/bag`, {
+      method: "PATCH",
+      body: JSON.stringify({ bag_no: nextBag ? Number(nextBag) : null })
+    });
+    _cameraAssetBagFilter = nextBag;
+    toast("Камерын баг шинэчлэгдлээ ✓");
+    camera_assets();
+  } catch(e) {
+    toast("Алдаа: " + e.message);
+  }
+}
+
+async function updateCameraCondition(id, condition) {
+  const nextCondition = CAMERA_CONDITIONS.includes(condition) ? condition : "Хэвийн";
+  try {
+    await api(`/api/assets/${id}/condition`, {
+      method: "PATCH",
+      body: JSON.stringify({ condition: nextCondition })
+    });
+    _cameraConditionFilter = nextCondition;
+    toast("Камерын нөхцөл шинэчлэгдлээ ✓");
+    camera_assets();
+  } catch(e) {
+    toast("Алдаа: " + e.message);
+  }
+}
+
 async function assets(filterCat) {
   const slMode = !!window._slAssetMode;
   window._slAssetMode = false;
@@ -150,10 +258,12 @@ async function assets(filterCat) {
   const renderTarget = embedTargetId ? document.getElementById(embedTargetId) : main;
   const embedded = !!embedTargetId && !!renderTarget;
   const canCreate = ["director","chief_engineer","storekeeper","camera_engineer"].includes(state.me.role) ||
-                    (slMode && state.me.role === "engineer");
-  const canDel    = ["director","chief_engineer"].includes(state.me.role);
+                    (slMode && ["engineer","electric"].includes(state.me.role));
+  const canDel    = ["director","chief_engineer"].includes(state.me.role) ||
+                    (slMode && ["engineer","electric"].includes(state.me.role));
   const cat = filterCat !== undefined ? filterCat : (window._assetCat || null);
   window._assetCat = cat;
+  if (cat !== "Камер") window._cameraAssetMode = false;
 
   const isGerCat      = Object.hasOwn(GER_CAT_MAP, cat || "");
   const isSlPoints    = cat === "Авто замын гэрэл";
@@ -312,11 +422,13 @@ async function assets(filterCat) {
         <span style="font-size:12px;color:#667085;font-weight:400">(${isGerCat ? gerRows.length : isSlPoints ? slRows.length : rows.length})</span>
       </div>
       <div style="display:flex;align-items:center;gap:8px">
+        ${canCreate && cat === "Шит/Самбар" ? `<button class="btn secondary" style="padding:6px 14px;font-size:12px;white-space:nowrap"
+          onclick="importPanelsFromMeters()">🔌 Тоолуураас татах</button>` : ""}
         ${canCreate ? `<button class="btn" style="padding:6px 14px;font-size:12px;white-space:nowrap"
           onclick="${isGerCat ? 'openGerForm()' : isSlPoints ? 'openSlForm()' : 'openAssetForm()'}">
           + ${escapeHtml(cat || 'Объект')} нэмэх
         </button>` : ""}
-        <input placeholder="Хайх..." oninput="filterAssets(this.value)"
+        <input placeholder="${cat === "Шит/Самбар" ? "Кодоор хайх..." : "Хайх..."}" oninput="filterAssets(this.value)"
           style="padding:6px 12px;border:1px solid #e2e6ed;border-radius:8px;font-size:12px;width:180px;outline:none">
       </div>
     </div>
@@ -405,6 +517,7 @@ async function assets(filterCat) {
           <th style="text-align:center">Толгойн тоо</th>
           <th>Төрөл</th>
           <th style="text-align:center;color:#dc2626">Гэмтэл</th>
+          <th style="text-align:center">Дутуу шон</th>
           <th style="text-align:center">Үйлдэл</th>
           <th style="text-align:center">Дэлгэрэнгүй</th>
         </tr></thead>
@@ -453,6 +566,7 @@ async function assets(filterCat) {
                 >
                 <div style="font-size:10px;margin-top:3px;font-weight:700;color:${pctColor}">${workPct}%</div>
               </td>
+              <td style="text-align:center">${r.needs_poles > 0 ? `<span style="background:#fff7ed;color:#d97706;border-radius:12px;padding:1px 8px;font-size:11px;font-weight:700">${r.needs_poles}</span>` : `<span style="color:#94a3b8">—</span>`}</td>
               <td style="text-align:center">
                 <div style="display:flex;gap:3px;justify-content:center;flex-wrap:wrap">
                   <button class="btn secondary" style="padding:3px 8px;font-size:10px" onclick="openGerForm(${r.id})" title="Засах">✏️</button>
@@ -467,7 +581,7 @@ async function assets(filterCat) {
                   onclick="openGerDetail(${r.id},'${escapeHtml(cat)}')" title="Дэлгэрэнгүй мэдээлэл">📋 Харах</button>
               </td>
             </tr>`;
-          }).join("") : `<tr><td colspan="9" style="text-align:center;color:#667085;padding:30px">Бүртгэл олдсонгүй</td></tr>`}
+          }).join("") : `<tr><td colspan="10" style="text-align:center;color:#667085;padding:30px">Бүртгэл олдсонгүй</td></tr>`}
         </tbody>
       </table>` : `
       <table id="assetTable">
@@ -497,7 +611,7 @@ async function assets(filterCat) {
                    onclick="resolveAssetFlag(${fl3.id})">✓</button>`
               : `<button class="btn secondary" style="padding:3px 8px;font-size:10px"
                    onclick="openAssetFlagModal('assets',${r.id},'${escapeHtml((r.name||"").replace(/'/g,""))}')">🚩</button>`;
-            return `<tr data-name="${escapeHtml((r.name||"").toLowerCase())}" data-loc="${escapeHtml((r.location||"").toLowerCase())}" style="${flStyle3}">
+            return `<tr data-code="${escapeHtml((r.asset_code||"").toLowerCase())}" data-name="${escapeHtml((r.name||"").toLowerCase())}" data-loc="${escapeHtml((r.location||"").toLowerCase())}" style="${flStyle3}">
               <td style="color:#94a3b8;font-size:11px">${i+1}</td>
               <td><span style="font-family:monospace;font-size:11px;background:#f1f5f9;padding:2px 6px;border-radius:4px">${escapeHtml(r.asset_code||"—")}</span></td>
               <td><span style="font-weight:600;cursor:pointer;color:#1d4ed8" onclick="openPassport(${r.id})">${escapeHtml(r.name)}</span>
@@ -547,6 +661,11 @@ async function assets(filterCat) {
 function filterAssets(val) {
   const v = val.toLowerCase();
   document.querySelectorAll("#assetTable tbody tr[data-name]").forEach(tr => {
+    const code = tr.dataset.code || "";
+    if (window._assetCat === "Шит/Самбар") {
+      tr.style.display = code.includes(v) ? "" : "none";
+      return;
+    }
     const name = tr.dataset.name || "";
     const loc  = tr.dataset.loc  || "";
     tr.style.display = name.includes(v) || loc.includes(v) ? "" : "none";
@@ -580,7 +699,7 @@ async function saveAssetFlag() {
     });
     closeAssetFlagModal();
     toast("🚩 Тэмдэглэгдлээ");
-    assets(window._assetCat);
+    refreshAssetView(window._assetCat);
   } catch(e) { toast("Алдаа: " + e.message); }
 }
 
@@ -589,7 +708,7 @@ async function resolveAssetFlag(flagId) {
   try {
     await api(`/api/asset-flags/${flagId}/resolve`, { method: "PUT" });
     toast("✓ Засагдсан гэж тэмдэглэгдлээ");
-    assets(window._assetCat);
+    refreshAssetView(window._assetCat);
   } catch(e) { toast("Алдаа: " + e.message); }
 }
 
@@ -598,7 +717,7 @@ async function deleteGerRow(id, name) {
   try {
     await api(`/api/sl-ger-inventory/${id}`, { method: "DELETE" });
     toast("Устгагдлаа ✓");
-    assets(window._assetCat);
+    refreshAssetView(window._assetCat);
   } catch(e) { toast("Алдаа: " + e.message); }
 }
 
@@ -607,7 +726,7 @@ async function deleteSlPointRow(id, name) {
   try {
     await api(`/api/sl-points/${id}`, { method: "DELETE" });
     toast("Устгагдлаа ✓");
-    assets(window._assetCat);
+    refreshAssetView(window._assetCat);
   } catch(e) { toast("Алдаа: " + e.message); }
 }
 
@@ -634,7 +753,7 @@ async function toggleTrafficStatus(id, current) {
         notes: "Жагсаалтаас шууд сольсон төлөв"
       })
     });
-    assets(window._assetCat);
+    refreshAssetView(window._assetCat);
   } catch(e) { toast("Алдаа: " + e.message); }
 }
 
@@ -674,7 +793,7 @@ async function openTrafficSignalJournal(assetId) {
     <button onclick="closeTrafficSignalModal()" style="border:none;background:rgba(255,255,255,.12);color:#fff;border-radius:8px;padding:6px 12px;cursor:pointer">✕</button>
   </div>
   <div style="padding:18px 20px">
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:12px">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-bottom:12px">
       <div>
         <div style="font-size:11px;color:#667085;margin-bottom:4px">Төлөв *</div>
         <select class="input" id="ts_status" style="margin:0">
@@ -806,20 +925,35 @@ async function openAssetForm(id) {
   if (id) {
     try { asset = await api(`/api/assets/${id}`); } catch(e){}
   }
+  let meterPoints = [];
+  try { meterPoints = await api("/api/mp"); } catch(e) {}
   const modal = document.getElementById("assetFormModal");
   const inner = document.getElementById("assetFormInner");
-  const title = asset ? "✏️ Объект засах" : "+ Объект бүртгэх";
   const formCat = asset?.category || window._assetCat || "";
+  const isCamera = formCat === "Камер";
+  const title = isCamera ? (asset ? "✏️ Камерын цэг засах" : "+ Камерын цэг бүртгэх") : (asset ? "✏️ Объект засах" : "+ Объект бүртгэх");
   const isTraffic = formCat === "Гэрлэн дохио";
-  const statusOpts = isTraffic ? ["Асаалтай","Унтраалтай"] : ASSET_STATUSES;
+  const statusOpts = isCamera ? ["Идэвхтэй","Идэвхгүй"] : (isTraffic ? ["Асаалтай","Унтраалтай"] : ASSET_STATUSES);
+  const conditionOpts = isCamera ? CAMERA_CONDITIONS : ASSET_CONDITIONS;
+  const currentCondition = isCamera ? cameraConditionOf(asset) : asset?.condition;
 
   inner.innerHTML = `
     <div style="padding:16px 22px;border-bottom:1px solid #e2e6ed;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;background:#fff;z-index:2;border-radius:14px 14px 0 0">
       <span style="font-size:15px;font-weight:800">${title}</span>
       <button onclick="closeAssetForm()" style="border:none;background:#f1f5f9;border-radius:8px;padding:6px 14px;cursor:pointer;color:#667085">✕</button>
     </div>
-    <div style="padding:18px 22px">
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+      <div style="padding:18px 22px">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+        <div>
+          <div style="font-size:11px;color:#667085;margin-bottom:4px">Код ${formCat==="Шит/Самбар"?"*":""}</div>
+          <input class="input" id="af_code" value="${escapeHtml(asset?.asset_code||"")}" list="assetCodeMeterList" data-asset-id="${id||""}"
+            oninput="checkAssetCodeDuplicate(${id||"null"})"
+            placeholder="${formCat==="Шит/Самбар"?"Жишээ: *K*2024100197":"Хоосон бол автоматаар үүснэ"}">
+          <datalist id="assetCodeMeterList">
+            ${meterPoints.map(m => `<option value="${escapeHtml(m.meter_no||"")}">${escapeHtml(m.location||m.name||"Тоолуур")}</option>`).join("")}
+          </datalist>
+          <div id="af_code_msg" style="font-size:10px;margin-top:4px;min-height:14px;color:#94a3b8">${formCat==="Шит/Самбар"?"Тоолуурын №-г шууд бичиж болно":""}</div>
+        </div>
         <div>
           <div style="font-size:11px;color:#667085;margin-bottom:4px">Хөрөнгийн нэр *</div>
           <input class="input" id="af_name" value="${escapeHtml(asset?.name||"")}" placeholder="Найрамдал паркийн гэрэлтүүлэг">
@@ -837,6 +971,22 @@ async function openAssetForm(id) {
           <div style="font-size:11px;color:#667085;margin-bottom:4px">Дэд ангилал</div>
           <input class="input" id="af_subcat" value="${escapeHtml(asset?.sub_category||"")}" placeholder="Авто зам / Гэр хороолол...">
         </div>
+        ${isCamera ? `<div>
+          <div style="font-size:11px;color:#667085;margin-bottom:4px">Камерын тоо *</div>
+          <input class="input" type="number" min="1" step="1" id="af_camera_count" value="${cameraCountOf(asset)}" placeholder="1-4">
+        </div>
+        <div>
+          <div style="font-size:11px;color:#667085;margin-bottom:4px">Баг</div>
+          <select class="input" id="af_bag_no">
+            <option value="">— Сонгох —</option>
+            ${Array.from({ length: 11 }, (_, i) => {
+              const b = i + 1;
+              return `<option value="${b}" ${Number(asset?.bag_no || 0)===b?"selected":""}>${b}-р баг</option>`;
+            }).join("")}
+            <option value="98" ${Number(asset?.bag_no || 0)===98?"selected":""}>Авто зам</option>
+            <option value="99" ${Number(asset?.bag_no || 0)===99?"selected":""}>Аж ахуйн нэгж</option>
+          </select>
+        </div>` : ""}
         <div>
           <div style="font-size:11px;color:#667085;margin-bottom:4px">Байршил</div>
           <input class="input" id="af_loc" value="${escapeHtml(asset?.location||"")}" placeholder="Найрамдал парк, Замын 3-р хэсэг...">
@@ -850,7 +1000,7 @@ async function openAssetForm(id) {
         <div>
           <div style="font-size:11px;color:#667085;margin-bottom:4px">Нөхцөл</div>
           <select class="input" id="af_cond">
-            ${ASSET_CONDITIONS.map(c=>`<option ${asset?.condition===c?"selected":""}>${c}</option>`).join("")}
+            ${conditionOpts.map(c=>`<option ${currentCondition===c?"selected":""}>${c}</option>`).join("")}
           </select>
         </div>
         <div>
@@ -869,13 +1019,13 @@ async function openAssetForm(id) {
           <div style="font-size:11px;color:#667085;margin-bottom:4px">Ашиглалтын хугацаа (жил)</div>
           <input class="input" type="number" id="af_life" value="${asset?.useful_life_years||10}">
         </div>
-        <div>
+        ${!isCamera ? `<div>
           <div style="font-size:11px;color:#667085;margin-bottom:4px">Хариуцагч инженер</div>
           <select class="input" id="af_assign">
             <option value="">— Сонгох —</option>
             ${state.users.map(u=>`<option value="${u.id}" ${asset?.assigned_to==u.id?"selected":""}>${u.full_name} (${u.position||""})</option>`).join("")}
           </select>
-        </div>
+        </div>` : ""}
         <div>
           <div style="font-size:11px;color:#667085;margin-bottom:4px">GPS (lat, lng)</div>
           <div style="display:flex;gap:6px">
@@ -899,11 +1049,41 @@ async function openAssetForm(id) {
     </div>`;
 
   modal.style.display = "flex";
+  checkAssetCodeDuplicate(id || null);
 }
 
 function closeAssetForm() {
   const m = document.getElementById("assetFormModal");
   if (m) m.style.display = "none";
+}
+
+let _assetCodeCheckTimer = null;
+function checkAssetCodeDuplicate(id) {
+  clearTimeout(_assetCodeCheckTimer);
+  const input = document.getElementById("af_code");
+  const msg = document.getElementById("af_code_msg");
+  if (!input || !msg) return;
+  const code = input.value.trim();
+  if (!code) {
+    input.dataset.duplicate = "0";
+    input.style.borderColor = "";
+    msg.style.color = "#94a3b8";
+    msg.textContent = "Код бичнэ үү";
+    return;
+  }
+  _assetCodeCheckTimer = setTimeout(async () => {
+    try {
+      const r = await api(`/api/assets/check-code?code=${encodeURIComponent(code)}${id ? `&exclude_id=${id}` : ""}`);
+      input.dataset.duplicate = r.exists ? "1" : "0";
+      input.style.borderColor = r.exists ? "#ef4444" : "#16a34a";
+      msg.style.color = r.exists ? "#dc2626" : "#16a34a";
+      msg.textContent = r.exists ? `Давхардсан код байна: ${r.asset?.name || code}` : "Код ашиглах боломжтой";
+    } catch(e) {
+      input.dataset.duplicate = "0";
+      msg.style.color = "#d97706";
+      msg.textContent = "Код шалгаж чадсангүй";
+    }
+  }, 250);
 }
 
 // ── GER inventory form ────────────────────────────────────────
@@ -934,6 +1114,10 @@ async function openGerForm(id) {
         <div>
           <div style="font-size:11px;color:#667085;margin-bottom:4px">Нийт толгой</div>
           <input class="input" type="number" id="gf_head" value="${rec?.head_count??0}">
+        </div>
+        <div>
+          <div style="font-size:11px;color:#667085;margin-bottom:4px">Дутуу шон</div>
+          <input class="input" type="number" min="0" id="gf_needs_poles" value="${rec?.needs_poles??0}">
         </div>
         <div>
           <div style="font-size:11px;color:#667085;margin-bottom:4px">Гэрлийн төрөл</div>
@@ -967,6 +1151,7 @@ async function saveGerForm(id, gerCat) {
     category: gerCat || GER_CAT_MAP[window._assetCat] || "Гэр хороолол",
     total_count: Number(g("gf_total")||0),
     head_count: Number(g("gf_head")||0),
+    needs_poles: Number(g("gf_needs_poles")||0),
     light_type: g("gf_type"),
     notes: g("gf_notes"),
   };
@@ -979,7 +1164,7 @@ async function saveGerForm(id, gerCat) {
       toast("Байршил бүртгэгдлээ ✓");
     }
     closeGerForm();
-    assets(window._assetCat);
+    refreshAssetView(window._assetCat);
   } catch(err) { toast("Алдаа: "+err.message); }
 }
 
@@ -1010,6 +1195,18 @@ async function openSlForm(id) {
         <div>
           <div style="font-size:11px;color:#667085;margin-bottom:4px">Шонгийн тоо</div>
           <input class="input" type="number" id="sf_lamps" value="${rec?.lamp_count??1}">
+        </div>
+        <div>
+          <div style="font-size:11px;color:#667085;margin-bottom:4px">Нөхөх шон</div>
+          <input class="input" type="number" min="0" id="sf_needs_poles" value="${rec?.needs_poles??0}">
+        </div>
+        <div>
+          <div style="font-size:11px;color:#667085;margin-bottom:4px">Нийт толгой</div>
+          <input class="input" type="number" min="0" id="sf_total_heads" value="${rec?.total_heads??0}">
+        </div>
+        <div>
+          <div style="font-size:11px;color:#667085;margin-bottom:4px">Гэрлийн төрөл</div>
+          <input class="input" id="sf_light_type" value="${escapeHtml(rec?.light_type||"")}" placeholder="лед 100">
         </div>
         <div>
           <div style="font-size:11px;color:#667085;margin-bottom:4px">Төлөв</div>
@@ -1050,6 +1247,9 @@ async function saveSlForm(id) {
     code, name,
     location: g("sf_loc"),
     lamp_count: Number(g("sf_lamps")||1),
+    total_heads: Number(g("sf_total_heads")||0),
+    light_type: g("sf_light_type"),
+    needs_poles: Number(g("sf_needs_poles")||0),
     status: g("sf_status"),
     install_date: g("sf_date")||null,
     notes: g("sf_notes"),
@@ -1063,7 +1263,7 @@ async function saveSlForm(id) {
       toast("Цэг бүртгэгдлээ ✓");
     }
     closeSlForm();
-    assets(window._assetCat);
+    refreshAssetView(window._assetCat);
   } catch(err) { toast("Алдаа: "+err.message); }
 }
 
@@ -1071,13 +1271,23 @@ async function saveAsset(id) {
   const g = el => (document.getElementById(el)||{}).value||"";
   const name = g("af_name").trim();
   if (!name) { toast("Нэр оруулна уу"); return; }
+  const category = g("af_cat");
+  const assetCode = g("af_code").trim();
+  if (category === "Шит/Самбар" && !assetCode) { toast("Шит/Самбарын код оруулна уу"); return; }
+  if ((document.getElementById("af_code")||{}).dataset?.duplicate === "1") {
+    toast("Код давхардсан байна");
+    return;
+  }
   const body = {
-    name, category: g("af_cat"), sub_category: g("af_subcat"),
+    asset_code: assetCode,
+    name, category, sub_category: g("af_subcat"),
     location: g("af_loc"), status: g("af_status"), condition: g("af_cond"),
     installed_date: g("af_date")||null, warranty_until: g("af_warranty")||null,
     purchase_price: Number(g("af_price")||0), useful_life_years: Number(g("af_life")||10),
     assigned_to: g("af_assign")||null,
     gps_lat: parseFloat(g("af_lat"))||null, gps_lng: parseFloat(g("af_lng"))||null,
+    camera_count: category === "Камер" ? Math.max(1, Number(g("af_camera_count") || 1)) : null,
+    bag_no: category === "Камер" ? (Number(g("af_bag_no") || 0) || null) : null,
     specs: g("af_specs"), description: g("af_desc"),
   };
   try {
@@ -1085,14 +1295,27 @@ async function saveAsset(id) {
       await api(`/api/assets/${id}`, { method:"PUT", body:JSON.stringify(body) });
       toast("Объект засагдлаа ✓");
       closeAssetForm();
-      assets(window._assetCat);
+      if (category === "Камер") _cameraAssetBagFilter = body.bag_no ? String(body.bag_no) : "";
+      refreshAssetView(window._assetCat);
     } else {
       const r = await api("/api/assets", { method:"POST", body:JSON.stringify(body) });
       toast(`Объект бүртгэгдлээ ✓ (${r.asset_code})`);
       closeAssetForm();
-      assets(body.category);
+      if (category === "Камер") _cameraAssetBagFilter = body.bag_no ? String(body.bag_no) : "";
+      refreshAssetView(body.category);
     }
   } catch(err) { toast("Алдаа: "+err.message); }
+}
+
+async function importPanelsFromMeters() {
+  if (!confirm("Тоолуурын бүртгэлээс Шит/Самбар автоматаар үүсгэж холбоx уу? Давхардсан кодтойг дахин үүсгэхгүй.")) return;
+  try {
+    const r = await api("/api/assets/panels/import-meters", { method:"POST", body:JSON.stringify({}) });
+    toast(`Тоолуураас татлаа ✓ Шинээр: ${r.created}, Холбосон: ${r.linked}, Алгассан: ${r.skipped}`);
+    assets("Шит/Самбар");
+  } catch(err) {
+    toast("Алдаа: " + err.message);
+  }
 }
 
 async function openPassport(id) {
@@ -1110,8 +1333,10 @@ async function openPassport(id) {
   catch(e) { inner.innerHTML = `<div style="padding:24px;color:#dc2626">Алдаа: ${e.message}</div>`; return; }
 
   const cat     = ASSET_CATEGORIES.find(c => c.id === asset.category) || ASSET_CATEGORIES[7];
-  const canEdit = ["director","chief_engineer","storekeeper","engineer","camera_engineer"].includes(state.me.role);
-  const canDel  = ["director","chief_engineer"].includes(state.me.role);
+  const lightingCats = new Set(["Авто замын гэрэл", "Гэр хорооллын гэрэл", "Цамхагийн гэрэл", "Шит/Самбар", "Гэрлэн дохио"]);
+  const canEdit = ["director","chief_engineer","storekeeper","engineer","electric","camera_engineer"].includes(state.me.role);
+  const canDel  = ["director","chief_engineer"].includes(state.me.role) ||
+                  (["engineer","electric"].includes(state.me.role) && lightingCats.has(asset.category));
 
   const installed  = asset.installed_date ? new Date(asset.installed_date) : null;
   const ageYears   = installed ? (Date.now() - installed) / (1000*60*60*24*365.25) : 0;
@@ -1172,7 +1397,7 @@ async function openPassport(id) {
 
   <div id="passportTabContent" style="max-height:65vh;overflow-y:auto">
     <div id="ptab_info" style="padding:20px 24px">
-      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:18px">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:18px">
         <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:12px;text-align:center">
           <div style="font-size:10px;color:#16a34a;font-weight:600;letter-spacing:.06em;margin-bottom:4px">АНХНЫ ҮНЭ</div>
           <div style="font-size:17px;font-weight:800;color:#16a34a">${(asset.purchase_price||0).toLocaleString()}<span style="font-size:11px">₮</span></div>
@@ -1578,7 +1803,7 @@ async function confirmDeleteAsset(id) {
     await api(`/api/assets/${id}`, { method:"DELETE" });
     toast("Объект устгагдлаа ✓");
     closePassport();
-    assets(window._assetCat);
+    refreshAssetView(window._assetCat);
   } catch(err) { toast("Алдаа: "+err.message); }
 }
 
@@ -1693,7 +1918,7 @@ async function openSlDetail(id) {
     </div>
   </div>
 
-  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;padding:18px 20px;border-bottom:1px solid #f1f5f9">
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;padding:18px 20px;border-bottom:1px solid #f1f5f9">
     <div style="background:#eff6ff;border-radius:10px;padding:12px;text-align:center">
       <div style="font-size:22px;font-weight:800;color:#2563eb">${pt.lamp_count||0}</div>
       <div style="font-size:11px;color:#64748b">Нийт шон</div>
@@ -2229,7 +2454,7 @@ async function openGerDetail(id, cat) {
     </div>
   </div>
 
-  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;padding:18px 20px;border-bottom:1px solid #f1f5f9">
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;padding:18px 20px;border-bottom:1px solid #f1f5f9">
     <div style="background:#eff6ff;border-radius:10px;padding:12px;text-align:center">
       <div style="font-size:22px;font-weight:800;color:#2563eb">${isCamhag?1:heads}</div>
       <div style="font-size:11px;color:#64748b">${isCamhag?"Шон":"Нийт шон"}</div>
@@ -2238,10 +2463,15 @@ async function openGerDetail(id, cat) {
       <div style="font-size:22px;font-weight:800;color:${catColor}">${heads}</div>
       <div style="font-size:11px;color:#64748b">Нийт толгой</div>
     </div>
+    ${(rec.needs_poles||0) > 0 ? `
+    <div style="background:#fff7ed;border-radius:10px;padding:12px;text-align:center">
+      <div style="font-size:22px;font-weight:800;color:#d97706">${rec.needs_poles}</div>
+      <div style="font-size:11px;color:#64748b">Дутуу шон</div>
+    </div>` : `
     <div style="background:#f0fdf4;border-radius:10px;padding:12px;text-align:center">
       <div style="font-size:22px;font-weight:800;color:#16a34a">100%</div>
       <div style="font-size:11px;color:#64748b">Асалтын хувь</div>
-    </div>
+    </div>`}
     <div style="background:#f8f9fb;border-radius:10px;padding:12px;text-align:center">
       <div style="font-size:14px;font-weight:700;color:#344054">${escapeHtml(rec.light_type||"—")}</div>
       <div style="font-size:11px;color:#64748b">Гэрлийн төрөл</div>
@@ -2252,6 +2482,7 @@ async function openGerDetail(id, cat) {
     ${[
       ["📍 Байршил",      escapeHtml(rec.location_name||"—")],
       ["🏘 Баг",          rec.bag_no ? rec.bag_no+"-р баг" : "—"],
+      ["⚠ Дутуу шон",    Number(rec.needs_poles||0) > 0 ? rec.needs_poles : "—"],
       ["📅 Суурилуулсан", rec.install_date||"—"],
       ["🏢 Байгууллага",  "Чойбалсан хөгжил ОНӨҮГ"],
       ["🗺 GPS",          rec.gps_lat&&rec.gps_lng ? `${rec.gps_lat}, ${rec.gps_lng}` : "—"],
@@ -2453,7 +2684,1107 @@ function sl_asset_ger()    { slAssets("Гэр хорооллын гэрэл"); }
 function sl_asset_tower()  { slAssets("Цамхагийн гэрэл"); }
 function sl_asset_signal() { slAssets("Гэрлэн дохио"); }
 function sl_asset_panel()  { slAssets("Шит/Самбар"); }
-function camera_assets()   { window._slAssetMode = false; assets("Камер"); }
+function cameraAssetTab(tab) {
+  _cameraAssetTab = tab === "list" ? "dashboard" : (tab || "dashboard");
+  camera_assets();
+}
+
+function cameraAssetSearch(val) {
+  _cameraAssetSearch = String(val || "").toLowerCase();
+  document.querySelectorAll("#cameraAssetTable tbody tr[data-search]").forEach(tr => {
+    const matchesSearch = tr.dataset.search.includes(_cameraAssetSearch);
+    const matchesBag = !_cameraAssetBagFilter || tr.dataset.bag === _cameraAssetBagFilter;
+    tr.style.display = matchesSearch && matchesBag ? "" : "none";
+  });
+}
+
+function cameraAssetBagFilter(val) {
+  _cameraAssetBagFilter = String(val || "");
+  camera_assets();
+}
+
+function cameraBagNoOf(asset) {
+  const explicit = Number(asset?.bag_no || 0);
+  if (explicit > 0) return explicit;
+  const text = `${asset?.name || ""} ${asset?.location || ""}`.toLowerCase();
+  const match = text.match(/(?:^|\D)(\d{1,2})\s*(?:-?\s*р|дугаар)?\s*баг\b/u);
+  return match ? Number(match[1]) : null;
+}
+
+function fiberRouteLengthM(latlngs) {
+  const R = 6371000;
+  let total = 0;
+  for (let i = 1; i < latlngs.length; i++) {
+    const a = latlngs[i - 1], b = latlngs[i];
+    const p1 = a.lat * Math.PI / 180, p2 = b.lat * Math.PI / 180;
+    const dp = (b.lat - a.lat) * Math.PI / 180;
+    const dl = (b.lng - a.lng) * Math.PI / 180;
+    const h = Math.sin(dp / 2) ** 2 + Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) ** 2;
+    total += 2 * R * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+  }
+  return Math.round(total);
+}
+
+function fmtFiberLength(m) {
+  return Number(m || 0) >= 1000 ? `${(Number(m) / 1000).toFixed(2)} км` : `${Math.round(Number(m || 0))} м`;
+}
+
+function fiberCoreColor(core) {
+  const found = FIBER_CORE_OPTIONS.find(o => o.core === Number(core));
+  return found?.color || "#7c3aed";
+}
+
+function fiberRouteCore(route) {
+  const explicit = Number(route?.core_count || 0);
+  if (explicit > 0) return explicit;
+  const match = String(route?.route_type || "").match(/(\d+)\s*core/i);
+  return match ? Number(match[1]) : 24;
+}
+
+function selectedFiberCore() {
+  return Number(document.getElementById("fiberCoreSelect")?.value || 24);
+}
+
+function fiberCoreLegendHtml() {
+  return FIBER_CORE_OPTIONS.map(o => `
+    <span style="display:inline-flex;align-items:center;gap:5px;font-size:11px;color:#475569;font-weight:700">
+      <span style="width:18px;height:4px;border-radius:20px;background:${o.color};display:inline-block"></span>${o.core} core
+    </span>
+  `).join("");
+}
+
+function fiberCameraIcon() {
+  return L.divIcon({
+    className: "",
+    html: `<div style="width:18px;height:18px;border-radius:50%;background:#2563eb;border:3px solid #fff;box-shadow:0 2px 8px rgba(15,23,42,.35);display:flex;align-items:center;justify-content:center;color:#fff;font-size:10px;line-height:1">●</div>`,
+    iconSize: [18, 18],
+    iconAnchor: [9, 9],
+    popupAnchor: [0, -10]
+  });
+}
+
+function updateFiberCameraLayerButton() {
+  const btn = document.getElementById("fiberCameraLayerBtn");
+  if (!btn) return;
+  btn.textContent = _fiberCameraLayerVisible ? "Камер: ON" : "Камер: OFF";
+  btn.style.background = _fiberCameraLayerVisible ? "#eff6ff" : "";
+  btn.style.borderColor = _fiberCameraLayerVisible ? "#2563eb" : "";
+  btn.style.color = _fiberCameraLayerVisible ? "#1d4ed8" : "";
+}
+
+function syncFiberCameraMarkerVisibility() {
+  if (!_fiberMap) return;
+  _fiberCameraMarkers.forEach(marker => {
+    if (_fiberCameraLayerVisible) {
+      if (!_fiberMap.hasLayer(marker)) marker.addTo(_fiberMap);
+    } else if (_fiberMap.hasLayer(marker)) {
+      marker.remove();
+    }
+  });
+  updateFiberCameraLayerButton();
+}
+
+function loadLeaflet() {
+  if (window.L) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    if (!document.querySelector("style[data-fiber-map]")) {
+      const style = document.createElement("style");
+      style.dataset.fiberMap = "1";
+      style.textContent = `
+        .fiber-route-label {
+          background: rgba(255,255,255,.92);
+          border: 1px solid #cbd5e1;
+          border-radius: 6px;
+          color: #0f172a;
+          font-size: 11px;
+          font-weight: 800;
+          padding: 2px 6px;
+          box-shadow: 0 2px 8px rgba(15,23,42,.12);
+        }
+      `;
+      document.head.appendChild(style);
+    }
+    if (!document.querySelector("link[data-leaflet]")) {
+      const link = document.createElement("link");
+      link.rel = "stylesheet";
+      link.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
+      link.dataset.leaflet = "1";
+      document.head.appendChild(link);
+    }
+    const existing = document.querySelector("script[data-leaflet]");
+    if (existing) {
+      existing.addEventListener("load", resolve, { once: true });
+      existing.addEventListener("error", reject, { once: true });
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
+    script.dataset.leaflet = "1";
+    script.onload = resolve;
+    script.onerror = () => reject(new Error("Газрын зургийн сан ачаалж чадсангүй"));
+    document.head.appendChild(script);
+  });
+}
+
+async function initFiberMap(cameraRows = []) {
+  const box = document.getElementById("fiberMap");
+  const msg = document.getElementById("fiberMapHint");
+  if (!box) return;
+  try { await loadLeaflet(); } catch(e) {
+    if (msg) msg.textContent = "Map ачаалж чадсангүй. Интернэт холболтоо шалгана уу.";
+    return;
+  }
+  if (_fiberMap) {
+    _fiberMap.remove();
+    _fiberMap = null;
+  }
+  _fiberDrawMode = false;
+  _fiberDrawPoints = [];
+  _fiberDrawLayer = null;
+  _fiberGpsRows = cameraRows;
+  _fiberCameraMarkers = [];
+  _fiberMap = L.map("fiberMap", { zoomControl: true }).setView([48.072, 114.532], 13);
+  const streetLayer = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: "&copy; OpenStreetMap"
+  });
+  const googleSatelliteLayer = L.tileLayer("https://mt{s}.google.com/vt/lyrs=s&x={x}&y={y}&z={z}", {
+    maxZoom: 20,
+    subdomains: ["0", "1", "2", "3"],
+    attribution: "&copy; Google"
+  }).addTo(_fiberMap);
+  const esriSatelliteLayer = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
+    maxZoom: 19,
+    attribution: "Tiles &copy; Esri"
+  });
+  googleSatelliteLayer.on("tileerror", () => {
+    if (msg) msg.textContent = "Satellite зураг ачаалахгүй байвал зүүн дээд layer-ээс 'Замын зураг' эсвэл 'Esri satellite' сонгоно уу.";
+  });
+  L.control.layers({
+    "Google satellite": googleSatelliteLayer,
+    "Esri satellite": esriSatelliteLayer,
+    "Замын зураг": streetLayer
+  }, null, { position: "topleft" }).addTo(_fiberMap);
+
+  const points = [];
+  cameraRows.forEach(r => {
+    const lat = Number(r.gps_lat), lng = Number(r.gps_lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+    points.push([lat, lng]);
+    const marker = L.marker([lat, lng], { icon: fiberCameraIcon(), draggable: _fiberCameraMoveMode })
+      .bindPopup(`<b>${escapeHtml(r.name || "Камер")}</b><br>${escapeHtml(r.asset_code || "")}<br>${escapeHtml(r.location || "")}<br><span style="font-size:11px;color:#64748b">GPS товчоор сонгоод map дээр дарна, эсвэл Камер зөөх горимоор чирнэ</span>`);
+    marker.assetId = r.id;
+    marker.on("dragstart", e => {
+      e.target._oldLatLng = e.target.getLatLng();
+    });
+    marker.on("dragend", async e => {
+      const pos = e.target.getLatLng();
+      const saved = await saveCameraGpsFromMap(r.id, pos.lat, pos.lng, { refresh: false });
+      if (!saved && e.target._oldLatLng) e.target.setLatLng(e.target._oldLatLng);
+    });
+    _fiberCameraMarkers.push(marker);
+    if (_fiberCameraLayerVisible) marker.addTo(_fiberMap);
+  });
+  syncFiberCameraMarkerVisibility();
+
+  try { _fiberRoutes = await api("/api/fiber-routes"); } catch(e) { _fiberRoutes = []; }
+  _fiberRoutes.forEach(route => {
+    const coords = route?.geojson?.geometry?.coordinates || [];
+    if (coords.length < 2) return;
+    const latlngs = coords.map(p => [Number(p[1]), Number(p[0])]);
+    points.push(...latlngs);
+    const core = fiberRouteCore(route);
+    const color = route.color || fiberCoreColor(core);
+    const line = L.polyline(latlngs, { color, weight: 5, opacity: 0.9 }).addTo(_fiberMap).bindPopup(`
+      <b>${escapeHtml(route.name)}</b><br>
+      ${core} core · ${escapeHtml(route.status || "")}<br>
+      Урт: ${fmtFiberLength(route.length_m)}<br>
+      ${route.note ? escapeHtml(route.note) + "<br>" : ""}
+      <button onclick="deleteFiberRoute(${route.id})" style="margin-top:6px;border:1px solid #fecaca;background:#fef2f2;color:#dc2626;border-radius:6px;padding:4px 8px;font-size:11px;cursor:pointer">Устгах</button>
+    `);
+    const label = route.note || route.name || `${core} core`;
+    if (label) line.bindTooltip(escapeHtml(label), { permanent: true, direction: "center", className: "fiber-route-label" });
+  });
+  if (points.length) _fiberMap.fitBounds(points, { padding: [30, 30], maxZoom: 16 });
+  if (msg) msg.textContent = `GPS-тэй камер: ${cameraRows.filter(r => Number.isFinite(Number(r.gps_lat)) && Number.isFinite(Number(r.gps_lng))).length} · Трасс: ${_fiberRoutes.length}`;
+  const gpsSelect = document.getElementById("fiberGpsAssetSelect");
+  if (gpsSelect) {
+    const missing = cameraRows.filter(r => !Number.isFinite(Number(r.gps_lat)) || !Number.isFinite(Number(r.gps_lng)));
+    gpsSelect.innerHTML = `<option value="">— GPS оруулах камер сонгох —</option>` +
+      missing.map(r => `<option value="${r.id}">${escapeHtml(r.asset_code || "")} · ${escapeHtml(r.name || "Камер")}</option>`).join("");
+    const gpsCount = document.getElementById("fiberGpsMissingCount");
+    if (gpsCount) gpsCount.textContent = `${missing.length} GPS-гүй`;
+  }
+  setTimeout(() => _fiberMap?.invalidateSize(), 80);
+  _fiberMap.on("click", e => {
+    if (_fiberGpsPickAssetId) {
+      saveCameraGpsFromMap(_fiberGpsPickAssetId, e.latlng.lat, e.latlng.lng);
+      return;
+    }
+    if (!_fiberDrawMode) return;
+    _fiberDrawPoints.push(e.latlng);
+    if (_fiberDrawLayer) _fiberDrawLayer.remove();
+    _fiberDrawLayer = L.polyline(_fiberDrawPoints, { color: fiberCoreColor(selectedFiberCore()), weight: 5, dashArray: "6 6" }).addTo(_fiberMap);
+    const hint = document.getElementById("fiberDrawHint");
+    if (hint) hint.textContent = `${_fiberDrawPoints.length} цэг · ${fmtFiberLength(fiberRouteLengthM(_fiberDrawPoints))}`;
+  });
+}
+
+function setFiberGpsTarget(assetId) {
+  _fiberGpsPickAssetId = String(assetId || "");
+  _fiberDrawMode = false;
+  const hint = document.getElementById("fiberGpsPickHint");
+  if (!hint) return;
+  if (!_fiberGpsPickAssetId) {
+    hint.textContent = "Камер сонгоод map дээр байршлыг дарна";
+    return;
+  }
+  const row = _fiberGpsRows.find(r => String(r.id) === _fiberGpsPickAssetId);
+  hint.textContent = `${row?.name || "Камер"} — map дээр байршлыг дарна уу`;
+}
+
+function toggleFiberCameraMoveMode() {
+  _fiberCameraMoveMode = !_fiberCameraMoveMode;
+  _fiberCameraMarkers.forEach(marker => {
+    if (_fiberCameraMoveMode) marker.dragging?.enable();
+    else marker.dragging?.disable();
+  });
+  const btn = document.getElementById("fiberCameraMoveBtn");
+  if (btn) {
+    btn.textContent = _fiberCameraMoveMode ? "Камер зөөх: ON" : "Камер зөөх";
+    btn.style.background = _fiberCameraMoveMode ? "#eff6ff" : "";
+    btn.style.borderColor = _fiberCameraMoveMode ? "#2563eb" : "";
+    btn.style.color = _fiberCameraMoveMode ? "#1d4ed8" : "";
+  }
+  const hint = document.getElementById("fiberGpsPickHint");
+  if (hint) hint.textContent = _fiberCameraMoveMode ? "Камерын цэгийг чирээд шинэ байршил дээр тавина" : "Камер сонгоод map дээр байршлыг дарна";
+}
+
+function toggleFiberCameraLayer() {
+  _fiberCameraLayerVisible = !_fiberCameraLayerVisible;
+  syncFiberCameraMarkerVisibility();
+}
+
+function pickFiberCameraGps(assetId) {
+  if (!_fiberMap) return toast("Газрын зураг ачаалагдаагүй байна");
+  if (!_fiberCameraLayerVisible) {
+    _fiberCameraLayerVisible = true;
+    syncFiberCameraMarkerVisibility();
+  }
+  setFiberGpsTarget(assetId);
+  const row = _fiberGpsRows.find(r => String(r.id) === String(assetId));
+  const marker = _fiberCameraMarkers.find(m => String(m.assetId) === String(assetId));
+  if (marker) {
+    _fiberMap.setView(marker.getLatLng(), Math.max(_fiberMap.getZoom(), 16));
+    marker.openPopup();
+  } else if (row) {
+    toast("Map дээр дарж энэ камерын GPS байрлалыг оруулна");
+  }
+  document.getElementById("fiberMap")?.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+async function saveCameraGpsFromMap(assetId, lat, lng, opts = {}) {
+  const row = _fiberGpsRows.find(r => String(r.id) === String(assetId));
+  if (!confirm(`${row?.name || "Камер"} цэгийн GPS-г энд хадгалах уу?\n${lat.toFixed(6)}, ${lng.toFixed(6)}`)) return false;
+  try {
+    await api(`/api/assets/${assetId}/gps`, {
+      method: "PATCH",
+      body: JSON.stringify({ gps_lat: lat, gps_lng: lng })
+    });
+    toast("GPS хадгаллаа ✓");
+    _fiberGpsPickAssetId = "";
+    if (opts.refresh === false) {
+      if (row) {
+        row.gps_lat = lat;
+        row.gps_lng = lng;
+      }
+    } else {
+      if (row) {
+        row.gps_lat = lat;
+        row.gps_lng = lng;
+      }
+      camera_assets();
+    }
+    return true;
+  } catch(e) {
+    toast("Алдаа: " + e.message);
+    return false;
+  }
+}
+
+function startFiberDraw() {
+  if (!_fiberMap) return toast("Газрын зураг ачаалагдаагүй байна");
+  _fiberDrawMode = true;
+  _fiberDrawPoints = [];
+  if (_fiberDrawLayer) _fiberDrawLayer.remove();
+  _fiberDrawLayer = null;
+  const hint = document.getElementById("fiberDrawHint");
+  if (hint) hint.textContent = "Map дээр цэг цэгээр дарж трассаа зурна";
+}
+
+function cancelFiberDraw() {
+  _fiberDrawMode = false;
+  _fiberDrawPoints = [];
+  if (_fiberDrawLayer) _fiberDrawLayer.remove();
+  _fiberDrawLayer = null;
+  const hint = document.getElementById("fiberDrawHint");
+  if (hint) hint.textContent = "Зураг дээр трасс зурж болно";
+}
+
+async function saveFiberDraw() {
+  if (_fiberDrawPoints.length < 2) return toast("Доод тал нь 2 цэг дарж трасс зурна уу");
+  const core = selectedFiberCore();
+  const noteInput = document.getElementById("fiberRouteNote");
+  const note = (noteInput?.value || "").trim();
+  const name = prompt("Трассын нэр:", note || `${core} core трасс`);
+  if (!name) return;
+  const coords = _fiberDrawPoints.map(p => [p.lng, p.lat]);
+  try {
+    await api("/api/fiber-routes", {
+      method: "POST",
+      body: JSON.stringify({
+        name,
+        route_type: `${core} core`,
+        core_count: core,
+        color: fiberCoreColor(core),
+        status: "Идэвхтэй",
+        note,
+        length_m: fiberRouteLengthM(_fiberDrawPoints),
+        geojson: { type: "Feature", geometry: { type: "LineString", coordinates: coords }, properties: {} }
+      })
+    });
+    toast("Трасс хадгалагдлаа ✓");
+    if (noteInput) noteInput.value = "";
+    cancelFiberDraw();
+    camera_assets();
+  } catch(e) { toast("Алдаа: " + e.message); }
+}
+
+async function deleteFiberRoute(id) {
+  if (!confirm("Энэ трассыг устгах уу?")) return;
+  try {
+    await api(`/api/fiber-routes/${id}`, { method: "DELETE" });
+    toast("Трасс устгагдлаа ✓");
+    camera_assets();
+  } catch(e) { toast("Алдаа: " + e.message); }
+}
+
+function camRepairFilterTable() {
+  const q     = (document.getElementById("camRepairSearchInput")?.value || "").toLowerCase().trim();
+  const yearF = document.getElementById("camRepairYearFilter")?.value  || "";
+  const monF  = document.getElementById("camRepairMonthFilter")?.value || "";
+  let visible = 0;
+  document.querySelectorAll("#camRepairTable tbody tr").forEach(tr => {
+    const d = tr.dataset.date || "";
+    const matchY = !yearF || d.slice(0, 4) === yearF;
+    const matchM = !monF  || d.slice(5, 7) === monF;
+    const matchQ = !q     || (tr.dataset.search || "").includes(q);
+    const show = matchY && matchM && matchQ;
+    tr.style.display = show ? "" : "none";
+    if (show) visible++;
+  });
+  const cnt = document.getElementById("camRepairCount");
+  if (cnt) cnt.textContent = `(${visible})`;
+}
+
+async function camera_assets() {
+  window._slAssetMode = false;
+  window._assetCat = "Камер";
+  window._cameraAssetMode = true;
+  const canCreate = ["director","chief_engineer","storekeeper","camera_engineer"].includes(state.me.role);
+  const canDel = ["director","chief_engineer"].includes(state.me.role);
+  let rows = [];
+  let fiberRows = [];
+  let flags = [];
+  let workRows = [];
+  let workExecs = [];
+  const workYear = window.workYear || new Date().getFullYear();
+  try {
+    [rows, fiberRows, flags, workRows, workExecs] = await Promise.all([
+      api("/api/assets?category=%D0%9A%D0%B0%D0%BC%D0%B5%D1%80"),
+      api("/api/assets?category=%D0%A8%D0%B8%D0%BB%D1%8D%D0%BD%20%D0%BA%D0%B0%D0%B1%D0%B5%D0%BB%D1%8C").catch(() => []),
+      api("/api/asset-flags").catch(() => []),
+      api("/api/work-logs").catch(() => []),
+      api(`/api/executions?year=${workYear}&category=${encodeURIComponent("Камер засвар")}`).catch(() => []),
+    ]);
+  } catch(e) {
+    toast("Камерын бүртгэл уншиж чадсангүй: " + e.message);
+  }
+  const flagMap = new Map(flags.map(f => [`${f.table_name}_${f.record_id}`, f]));
+  const closedStatuses = new Set(["Дууссан", "Хаагдсан"]);
+  const cameraWorkRows = workRows
+    .filter(r => r.category === "Камер засвар")
+    .sort((a, b) => String(b.start_date || b.work_date || "").localeCompare(String(a.start_date || a.work_date || "")));
+  const openCameraWorkRows = cameraWorkRows.filter(r => !closedStatuses.has(r.status));
+  const activeRows = rows.filter(r => r.status === "Идэвхтэй");
+  const brokenCameraCount = rows.reduce((sum, r) => sum + cameraBrokenCountOf(r), 0);
+  const locations = new Set(rows.map(r => (r.location || "").trim()).filter(Boolean));
+  const totalCameraCount = rows.reduce((sum, r) => sum + cameraCountOf(r), 0);
+  const workingCameraCount = Math.max(0, totalCameraCount - brokenCameraCount);
+  const cameraAvailabilityPct = totalCameraCount ? ((workingCameraCount / totalCameraCount) * 100).toFixed(1) : "0.0";
+  const execsByWork = new Map();
+  workExecs.forEach(e => {
+    const list = execsByWork.get(e.work_log_id) || [];
+    list.push(e);
+    execsByWork.set(e.work_log_id, list);
+  });
+  const currentRows = rows;
+  const cameraBagRows = currentRows
+    .map(r => ({ ...r, _camera_bag_no: cameraBagNoOf(r) }));
+  const searchedRows = cameraBagRows.filter(r => {
+    const matchesSearch = !_cameraAssetSearch ||
+      `${r.asset_code||""} ${r.name||""} ${r.location||""} ${r.assigned_name||""}`.toLowerCase().includes(_cameraAssetSearch);
+    const matchesBag = !_cameraAssetBagFilter || String(r._camera_bag_no || "") === _cameraAssetBagFilter;
+    const matchesCondition = !_cameraConditionFilter || cameraConditionOf(r) === _cameraConditionFilter;
+    return matchesSearch && matchesBag && matchesCondition;
+  });
+  const cameraBagCounts = new Map();
+  cameraBagRows.forEach(r => {
+    const bagNo = Number(r._camera_bag_no || 0);
+    if ((bagNo >= 1 && bagNo <= 11) || bagNo === 98 || bagNo === 99) cameraBagCounts.set(bagNo, (cameraBagCounts.get(bagNo) || 0) + 1);
+  });
+  const cameraBagBtn = (value, label, count = null) => {
+    const active = String(value || "") === _cameraAssetBagFilter;
+    return `<button type="button" onclick="cameraAssetBagFilter('${value || ""}')"
+      style="border:1px solid ${active ? "#2563eb" : "#dbe3ef"};background:${active ? "#eff6ff" : "#fff"};color:${active ? "#1d4ed8" : "#475569"};border-radius:8px;padding:7px 10px;font-size:12px;font-weight:800;cursor:pointer;white-space:nowrap;min-width:58px">
+      ${label}${count === null ? "" : ` <span style="font-size:10px;color:${active ? "#2563eb" : "#94a3b8"}">(${count})</span>`}
+    </button>`;
+  };
+  const cameraBagButtonsHtml = `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+    ${Array.from({ length: 11 }, (_, i) => {
+      const b = i + 1;
+      return cameraBagBtn(String(b), `${b}-р`, cameraBagCounts.get(b) || 0);
+    }).join("")}
+    ${cameraBagBtn("98", "Авто зам", cameraBagCounts.get(98) || 0)}
+    ${cameraBagBtn("99", "Аж ахуйн нэгж", cameraBagCounts.get(99) || 0)}
+    <span style="margin-left:auto">${cameraBagBtn("", "Бүгд", cameraBagRows.length)}</span>
+  </div>`;
+  const conditionScopeRows = cameraBagRows.filter(r => {
+    const matchesSearch = !_cameraAssetSearch ||
+      `${r.asset_code||""} ${r.name||""} ${r.location||""} ${r.assigned_name||""}`.toLowerCase().includes(_cameraAssetSearch);
+    const matchesBag = !_cameraAssetBagFilter || String(r._camera_bag_no || "") === _cameraAssetBagFilter;
+    return matchesSearch && matchesBag;
+  });
+  const cameraConditionCounts = new Map();
+  conditionScopeRows.forEach(r => {
+    const condition = cameraConditionOf(r);
+    cameraConditionCounts.set(condition, (cameraConditionCounts.get(condition) || 0) + 1);
+  });
+  const cameraConditionBtn = (value, label, count = null) => {
+    const active = String(value || "") === _cameraConditionFilter;
+    const colors = {
+      "Засварлах": ["#fff7ed", "#d97706", "#fed7aa"],
+      "Хэвийн": ["#f0fdf4", "#16a34a", "#bbf7d0"],
+      "Татан буулгах": ["#fef2f2", "#dc2626", "#fecaca"],
+      "Нүүлгэх": ["#eff6ff", "#2563eb", "#bfdbfe"],
+    }[value] || ["#fff", "#475569", "#dbe3ef"];
+    return `<button type="button" onclick="cameraConditionFilter('${value || ""}')"
+      style="border:1px solid ${active ? colors[1] : colors[2]};background:${active ? colors[0] : "#fff"};color:${active ? colors[1] : "#475569"};border-radius:8px;padding:7px 10px;font-size:12px;font-weight:800;cursor:pointer;white-space:nowrap">
+      ${label}${count === null ? "" : ` <span style="font-size:10px;color:${active ? colors[1] : "#94a3b8"}">(${count})</span>`}
+    </button>`;
+  };
+  const cameraConditionButtonsHtml = `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+    ${cameraConditionBtn("", "Бүх нөхцөл", conditionScopeRows.length)}
+    ${CAMERA_CONDITIONS.map(c => cameraConditionBtn(c, c, cameraConditionCounts.get(c) || 0)).join("")}
+  </div>`;
+  const searchedWorks = _cameraAssetSearch
+    ? cameraWorkRows.filter(r => `${r.title||""} ${r.location||""} ${r.description||""} ${r.assigned_name||""} ${r.status||""}`.toLowerCase().includes(_cameraAssetSearch))
+    : cameraWorkRows;
+  const searchedFibers = _cameraAssetSearch
+    ? fiberRows.filter(r => `${r.asset_code||""} ${r.name||""} ${r.location||""} ${r.assigned_name||""} ${r.status||""}`.toLowerCase().includes(_cameraAssetSearch))
+    : fiberRows;
+  const fiberMapCameraRows = _cameraAssetSearch
+    ? cameraBagRows.filter(r => `${r.asset_code||""} ${r.name||""} ${r.location||""} ${r.assigned_name||""}`.toLowerCase().includes(_cameraAssetSearch))
+    : cameraBagRows;
+  const statusPill = (status = "") => {
+    const color = status === "Хаагдсан" || status === "Дууссан" ? ["#dcfce7","#15803d"] :
+      status === "Явцтай" || status === "Эхэлсэн" ? ["#dbeafe","#1d4ed8"] :
+      status === "Хүлээгдэж байгаа" ? ["#f1f5f9","#475569"] : ["#fff7ed","#d97706"];
+    return `<span style="font-size:10px;padding:3px 9px;border-radius:20px;background:${color[0]};color:${color[1]};font-weight:800">${escapeHtml(status || "—")}</span>`;
+  };
+  const tabBtn = (key, label) => `<button onclick="cameraAssetTab('${key}')" style="border:none;background:transparent;padding:12px 14px;cursor:pointer;font-size:13px;font-weight:700;color:${_cameraAssetTab===key?"#2563eb":"#475569"};border-bottom:3px solid ${_cameraAssetTab===key?"#2563eb":"transparent"}">${label}</button>`;
+  const kpi = (label, value, color, bg, sub = "") => `<div style="background:${bg};border:1px solid ${color}33;border-radius:8px;padding:14px 16px;min-width:150px">
+    <div style="font-size:24px;font-weight:800;color:${color}">${value}</div>
+    <div style="font-size:12px;color:#475569;margin-top:4px">${label}</div>
+    ${sub ? `<div style="font-size:10px;color:${color};font-weight:700;margin-top:3px">${sub}</div>` : ""}
+  </div>`;
+
+  // repair tab header — computed before template to avoid deep backtick nesting
+  const _curMon = String(new Date().getMonth() + 1).padStart(2, "0");
+  const _repairYears = [...new Set(cameraWorkRows.map(w => (w.start_date||w.work_date||"").slice(0,4)).filter(Boolean))].sort().reverse();
+  if (!_repairYears.includes(String(workYear))) _repairYears.unshift(String(workYear));
+  const _MON = ["1-р сар","2-р сар","3-р сар","4-р сар","5-р сар","6-р сар","7-р сар","8-р сар","9-р сар","10-р сар","11-р сар","12-р сар"];
+  const _repairYearOpts = _repairYears.map(y => "<option value='" + y + "'" + (y===String(workYear)?" selected":"") + ">" + y + "</option>").join("");
+  const _repairMonOpts  = _MON.map((n,i) => { const v=String(i+1).padStart(2,"0"); return "<option value='" + v + "'" + (v===_curMon?" selected":"") + ">" + n + "</option>"; }).join("");
+  const _repairAddBtn   = ["director","chief_engineer","engineer","camera_engineer"].includes(state.me.role)
+    ? "<button class='btn' onclick=\"window.workCat='Камер засвар';window.workYear=" + workYear + ";show('work');setTimeout(()=>toggleWorkForm?.(),250)\" style='padding:6px 14px;font-size:12px'>+ Камер засвар нэмэх</button>" : "";
+  const camRepairHeader = "<div style='display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid #e2e6ed;gap:12px;flex-wrap:wrap'>"
+    + "<div style='font-size:14px;font-weight:800'>🛠 Камер засварын ажлууд <span id='camRepairCount' style='font-size:12px;color:#667085;font-weight:400'></span></div>"
+    + "<div style='display:flex;gap:8px;flex-wrap:wrap;align-items:center'>"
+    + "<select id='camRepairYearFilter' class='input' style='width:78px;margin:0' onchange='camRepairFilterTable()'><option value=''>Бүх жил</option>" + _repairYearOpts + "</select>"
+    + "<select id='camRepairMonthFilter' class='input' style='width:110px;margin:0' onchange='camRepairFilterTable()'><option value=''>Бүх сар</option>" + _repairMonOpts + "</select>"
+    + "<input id='camRepairSearchInput' class='input' style='width:170px;margin:0' placeholder='🔍 Хайх...' oninput='camRepairFilterTable()'>"
+    + "<button class='btn secondary' onclick=\"window.workCat='Камер засвар';window.workYear=" + workYear + ";show('work')\" style='padding:6px 14px;font-size:12px'>📅 Gantt нээх</button>"
+    + _repairAddBtn
+    + "</div></div>";
+
+  // rows pre-computed to avoid nested backtick depth > 2 inside main.innerHTML template
+  const camRepairRows = cameraWorkRows.length ? cameraWorkRows.map((w, i) => {
+    const execs = execsByWork.get(w.id) || [];
+    const progress = Math.max(0, Math.min(100, Number(w.progress || 0)));
+    const wDate = w.start_date || w.work_date || "";
+    const pColor = progress >= 100 ? "#16a34a" : "#2563eb";
+    const searchStr = ((w.title||"") + " " + (w.location||"") + " " + (w.assigned_name||"") + " " + (w.status||"")).toLowerCase();
+    const descHtml = w.description
+      ? "<div style='font-size:11px;color:#94a3b8;margin-top:2px'>" + escapeHtml(String(w.description).slice(0,90)) + (String(w.description).length > 90 ? "…" : "") + "</div>"
+      : "";
+    return `<tr data-search="${escapeHtml(searchStr)}" data-date="${escapeHtml(wDate)}">
+      <td style="color:#94a3b8;font-size:11px">${i+1}</td>
+      <td>
+        <div style="font-weight:800;color:#1d4ed8">${escapeHtml(w.title || "—")}</div>
+        <div style="font-size:11px;color:#667085;margin-top:2px">📍 ${escapeHtml(w.location || "Байршил оруулаагүй")}</div>
+        ${descHtml}
+      </td>
+      <td style="font-size:12px;font-family:monospace;color:#475569;white-space:nowrap">${escapeHtml(w.start_date || w.work_date || "—")} → ${escapeHtml(w.end_date || w.work_date || "—")}</td>
+      <td style="text-align:center;min-width:90px">
+        <div style="font-weight:800;color:${pColor}">${progress}%</div>
+        <div style="height:5px;background:#e2e8f0;border-radius:99px;overflow:hidden;margin-top:4px">
+          <div style="height:100%;width:${progress}%;background:${pColor}"></div>
+        </div>
+      </td>
+      <td>${statusPill(w.status)}</td>
+      <td style="font-size:12px">${escapeHtml(w.assigned_name || w.created_name || "—")}</td>
+      <td style="text-align:center;font-family:monospace;color:#667085">${execs.length}</td>
+      <td style="text-align:center;font-family:monospace;color:#667085">${(w.photo_count || 0) + execs.reduce((s, e) => s + Number(e.photo_count || 0), 0)}</td>
+      <td><div style="display:flex;gap:4px;justify-content:flex-end;flex-wrap:wrap">
+        <button class="btn secondary" style="padding:3px 8px;font-size:10px" onclick="window.workCat='Камер засвар';window.workYear=${workYear};show('work')">📅</button>
+        <button class="btn secondary" style="padding:3px 8px;font-size:10px" onclick="window.workCat='Камер засвар';window.workYear=${workYear};show('work');setTimeout(()=>editWorkById?.(${w.id},window._workAllRows||[]),350)">✏️</button>
+      </div></td>
+    </tr>`;
+  }).join("") : "<tr><td colspan='9' style='text-align:center;color:#667085;padding:30px'>Камер засварын ажил бүртгэгдээгүй байна</td></tr>";
+
+  main.innerHTML = `
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:12px">
+    <div>
+      <h1 style="margin:0 0 4px;font-size:22px;font-weight:800">🎥 Камерын цэгийн бүртгэлийн төв</h1>
+      <div style="font-size:12px;color:#667085">Камерын цэг · Камерын тоо · Гэмтэл · Төлөв · Байршил</div>
+    </div>
+    ${canCreate ? `<button class="btn" onclick="openAssetForm()" style="padding:9px 16px">+ Камерын цэг нэмэх</button>` : ""}
+  </div>
+
+  <div class="panel" style="margin-bottom:16px;overflow:hidden">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:0 18px">
+      <div style="display:flex;align-items:center;gap:4px;overflow-x:auto">
+        ${tabBtn("dashboard","📊 Самбар / цэгийн жагсаалт")}
+        ${tabBtn("fiber","🧵 Шилэн кабель")}
+        ${tabBtn("repair","🛠 Засвар / гэмтэл")}
+        ${tabBtn("report","📈 Судалгаа")}
+      </div>
+      <input value="${escapeHtml(_cameraAssetSearch)}" oninput="cameraAssetSearch(this.value)" placeholder="Камер, код, байршил хайх..."
+        style="padding:8px 12px;border:1px solid #dbe3ef;border-radius:8px;font-size:12px;width:min(280px,100%);outline:none">
+    </div>
+  </div>
+
+  <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px">
+    ${kpi("Камерын цэг", rows.length, "#2563eb", "#eff6ff")}
+    ${kpi("Нийт камер", totalCameraCount, "#0ea5e9", "#f0f9ff")}
+    ${kpi("Ажиллагааны хувь", `${cameraAvailabilityPct}%`, "#16a34a", "#f0fdf4", `${workingCameraCount} хэвийн`)}
+    ${kpi("Гэмтэлтэй камер", brokenCameraCount, "#d97706", "#fff7ed")}
+    ${kpi("Камер засвар", openCameraWorkRows.length, "#dc2626", "#fef2f2", `${cameraWorkRows.length} нийт ажил`)}
+    ${kpi("Шилэн кабель", fiberRows.length, "#8b5cf6", "#f5f3ff")}
+    ${kpi("Байршил", locations.size, "#7c3aed", "#f5f3ff")}
+  </div>
+
+  ${_cameraAssetTab === "report" ? `<div id="cameraAnalyticsBox" class="panel" style="padding:18px;margin-bottom:16px">
+    <div style="text-align:center;color:#667085;padding:24px">Судалгаа ачааллаж байна...</div>
+  </div>` : ""}
+
+  <div id="assetFormModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1000;align-items:flex-start;justify-content:center;padding-top:30px;overflow-y:auto"
+    onclick="if(event.target===this)closeAssetForm()"><div id="assetFormInner" style="background:#fff;border-radius:14px;width:min(700px,96vw);margin:0 auto 40px;box-shadow:0 20px 60px rgba(0,0,0,.25)"></div></div>
+  <div id="assetPassportModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1000;align-items:flex-start;justify-content:center;padding-top:30px;overflow-y:auto"
+    onclick="if(event.target===this)closePassport()"><div id="assetPassportInner" style="background:#fff;border-radius:14px;width:min(780px,96vw);margin:0 auto 40px;box-shadow:0 20px 60px rgba(0,0,0,.25)"></div></div>
+  <div id="globalLightbox" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.93);z-index:3000;align-items:center;justify-content:center;flex-direction:column"
+    onclick="if(event.target.id==='globalLightbox')closeLightbox()">
+    <button onclick="closeLightbox()" style="position:fixed;top:14px;right:18px;background:rgba(255,255,255,.15);border:none;color:#fff;border-radius:8px;padding:6px 16px;cursor:pointer;font-size:15px;z-index:1">✕</button>
+    <button id="lbPrev" onclick="lightboxNav(-1)" style="display:none;position:fixed;left:14px;top:50%;transform:translateY(-50%);background:rgba(255,255,255,.15);border:none;color:#fff;border-radius:50%;width:48px;height:48px;font-size:26px;cursor:pointer;z-index:1;line-height:1">‹</button>
+    <img id="lbImg" style="max-width:92vw;max-height:88vh;object-fit:contain;border-radius:8px;box-shadow:0 8px 48px rgba(0,0,0,.6)">
+    <div id="lbCaption" style="color:rgba(255,255,255,.6);font-size:12px;margin-top:12px;text-align:center"></div>
+    <button id="lbNext" onclick="lightboxNav(1)" style="display:none;position:fixed;right:14px;top:50%;transform:translateY(-50%);background:rgba(255,255,255,.15);border:none;color:#fff;border-radius:50%;width:48px;height:48px;font-size:26px;cursor:pointer;z-index:1;line-height:1">›</button>
+  </div>
+  <div id="assetFlagModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:2000;align-items:center;justify-content:center"
+    onclick="if(event.target===this)closeAssetFlagModal()">
+    <div style="background:#fff;border-radius:14px;width:min(420px,94vw);padding:24px;box-shadow:0 20px 60px rgba(0,0,0,.25)">
+      <div style="font-size:15px;font-weight:800;margin-bottom:6px">🚩 Буруу бүртгэл тэмдэглэх</div>
+      <div id="afmTitle" style="font-size:12px;color:#667085;margin-bottom:14px"></div>
+      <div style="font-size:11px;color:#374151;font-weight:600;margin-bottom:6px">Юу буруу бүртгэгдсэн? *</div>
+      <textarea id="afmNote" rows="3" placeholder="Жишээ: байршил, код, хариуцагч буруу..."
+        style="width:100%;border:1px solid #e2e6ed;border-radius:8px;padding:8px 10px;font-size:13px;resize:vertical;outline:none;box-sizing:border-box"></textarea>
+      <div style="display:flex;gap:8px;margin-top:14px">
+        <button onclick="saveAssetFlag()" class="btn" style="flex:1;background:#d97706;border-color:#d97706">🚩 Тэмдэглэх</button>
+        <button onclick="closeAssetFlagModal()" class="btn secondary">Цуцлах</button>
+      </div>
+    </div>
+  </div>
+
+  ${_cameraAssetTab === "fiber" ? `
+  <div class="panel">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid #e2e6ed;gap:12px;flex-wrap:wrap">
+      <div>
+        <div style="font-size:14px;font-weight:800">🧵 Шилэн кабелийн бүртгэл <span style="font-size:12px;color:#667085;font-weight:400">(${searchedFibers.length})</span></div>
+        <div style="font-size:11px;color:#667085;margin-top:2px">Камерын сүлжээний шилэн кабель, байршил, хариуцагч, файл</div>
+      </div>
+      ${canCreate ? `<button class="btn" onclick="window._assetCat='Шилэн кабель';openAssetForm()" style="padding:6px 14px;font-size:12px">+ Кабель нэмэх</button>` : ""}
+    </div>
+    <div style="padding:14px 18px;border-bottom:1px solid #e2e6ed;background:#fbfdff">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+        <div>
+          <div style="font-size:13px;font-weight:800;color:#1e293b">🗺 Шилэн кабелийн трассын зураг</div>
+          <div id="fiberMapHint" style="font-size:11px;color:#667085;margin-top:2px">Газрын зураг ачааллаж байна...</div>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <span id="fiberDrawHint" style="font-size:11px;color:#667085;margin-right:4px">Зураг дээр трасс зурж болно</span>
+          <button class="btn secondary" style="padding:6px 12px;font-size:12px" onclick="startFiberDraw()">Трасс зурах</button>
+          <button class="btn" style="padding:6px 12px;font-size:12px" onclick="saveFiberDraw()">Хадгалах</button>
+          <button class="btn secondary" style="padding:6px 12px;font-size:12px" onclick="cancelFiberDraw()">Цуцлах</button>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:8px 10px">
+        <div style="font-size:12px;font-weight:800;color:#334155">Core / өнгө</div>
+        <select id="fiberCoreSelect" class="input" style="width:130px;margin:0;padding:7px 10px;font-size:12px">
+          ${FIBER_CORE_OPTIONS.map(o => `<option value="${o.core}" ${o.core === 24 ? "selected" : ""}>${o.core} core</option>`).join("")}
+        </select>
+        <input id="fiberRouteNote" class="input" placeholder="Тэмдэглэл / холболт / хайрцаг..." style="width:min(380px,100%);margin:0;padding:7px 10px;font-size:12px">
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-left:auto">${fiberCoreLegendHtml()}</div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:8px 10px">
+        <div style="font-size:12px;font-weight:800;color:#334155">📍 GPS оруулах</div>
+        <select id="fiberGpsAssetSelect" class="input" onchange="setFiberGpsTarget(this.value)" style="width:min(360px,100%);margin:0;padding:7px 10px;font-size:12px"></select>
+        <span id="fiberGpsMissingCount" style="font-size:11px;color:#94a3b8;font-weight:700"></span>
+        <button id="fiberCameraLayerBtn" class="btn secondary" type="button" onclick="toggleFiberCameraLayer()" style="padding:6px 12px;font-size:12px">Камер: ON</button>
+        <button id="fiberCameraMoveBtn" class="btn secondary" type="button" onclick="toggleFiberCameraMoveMode()" style="padding:6px 12px;font-size:12px">Камер зөөх</button>
+        <span id="fiberGpsPickHint" style="font-size:11px;color:#667085">Камер сонгоод map дээр байршлыг дарна</span>
+      </div>
+      <div id="fiberMap" style="height:430px;border:1px solid #dbe3ef;border-radius:8px;overflow:hidden;background:#e5edf7"></div>
+    </div>
+    <div style="padding:12px 18px;border-bottom:1px solid #e2e6ed;background:#fff">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+        <div style="font-size:13px;font-weight:800;color:#1e293b">🎥 Камерын GPS жагсаалт <span style="font-size:12px;color:#667085;font-weight:400">(${fiberMapCameraRows.length})</span></div>
+        <div style="font-size:11px;color:#667085">GPS товч дараад map дээр шинэ байрлал дарна</div>
+      </div>
+      <div style="max-height:260px;overflow:auto;border:1px solid #e2e8f0;border-radius:8px">
+        <table style="width:100%;border-collapse:collapse">
+          <thead><tr style="background:#f8fafc">
+            <th style="text-align:left;padding:9px 10px;font-size:11px;color:#475569">#</th>
+            <th style="text-align:left;padding:9px 10px;font-size:11px;color:#475569">Код</th>
+            <th style="text-align:left;padding:9px 10px;font-size:11px;color:#475569">Камер / байршил</th>
+            <th style="text-align:left;padding:9px 10px;font-size:11px;color:#475569">GPS</th>
+            <th style="text-align:center;padding:9px 10px;font-size:11px;color:#475569">Үйлдэл</th>
+          </tr></thead>
+          <tbody>
+            ${fiberMapCameraRows.map((r, i) => {
+              const hasGps = Number.isFinite(Number(r.gps_lat)) && Number.isFinite(Number(r.gps_lng));
+              return `<tr style="border-top:1px solid #eef2f7">
+                <td style="padding:8px 10px;font-size:11px;color:#94a3b8">${i + 1}</td>
+                <td style="padding:8px 10px"><span style="font-family:monospace;font-size:11px;background:#f1f5f9;padding:2px 6px;border-radius:4px">${escapeHtml(r.asset_code || "—")}</span></td>
+                <td style="padding:8px 10px">
+                  <div style="font-size:12px;font-weight:800;color:#1d4ed8;cursor:pointer" onclick="openPassport(${r.id})">${escapeHtml(r.name || "Камер")}</div>
+                  <div style="font-size:11px;color:#667085;margin-top:2px">${escapeHtml(r.location || "Байршил оруулаагүй")}</div>
+                </td>
+                <td style="padding:8px 10px;font-family:monospace;font-size:11px;color:${hasGps ? "#15803d" : "#dc2626"}">${hasGps ? `${Number(r.gps_lat).toFixed(6)}, ${Number(r.gps_lng).toFixed(6)}` : "GPS байхгүй"}</td>
+                <td style="padding:8px 10px;text-align:center">
+                  <button class="btn secondary" type="button" onclick="pickFiberCameraGps(${r.id})" style="padding:4px 10px;font-size:11px">GPS</button>
+                </td>
+              </tr>`;
+            }).join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table id="cameraAssetTable">
+        <thead><tr>
+          <th style="width:40px">#</th>
+          <th>Код</th>
+          <th>Нэр / байршил</th>
+          <th>Дэд ангилал</th>
+          <th>Төлөв</th>
+          <th>Нөхцөл</th>
+          <th>Хариуцагч</th>
+          <th style="text-align:center">Файл</th>
+          <th style="text-align:center">Ажил</th>
+          <th></th>
+        </tr></thead>
+        <tbody>
+          ${searchedFibers.length ? searchedFibers.map((r,i) => {
+            const condColor = r.condition === "Хэвийн" ? "#16a34a" : r.condition === "Засвар хэрэгтэй" ? "#d97706" : "#dc2626";
+            const statusBg = r.status === "Идэвхтэй" ? "#dcfce7" : r.status === "Засварт" ? "#fff7ed" : "#f1f5f9";
+            const statusColor = r.status === "Идэвхтэй" ? "#16a34a" : r.status === "Засварт" ? "#d97706" : "#475569";
+            const fl = flagMap.get(`assets_${r.id}`);
+            const search = `${r.asset_code||""} ${r.name||""} ${r.location||""} ${r.assigned_name||""}`.toLowerCase();
+            return `<tr data-search="${escapeHtml(search)}" style="${fl&&!fl.is_resolved?"background:#fffbeb;border-left:3px solid #d97706":""}">
+              <td style="color:#94a3b8;font-size:11px">${i+1}</td>
+              <td><span style="font-family:monospace;font-size:11px;background:#f1f5f9;padding:2px 6px;border-radius:4px">${escapeHtml(r.asset_code||"—")}</span></td>
+              <td>
+                <div style="font-weight:800;color:#1d4ed8;cursor:pointer" onclick="openPassport(${r.id})">${escapeHtml(r.name||"—")}</div>
+                <div style="font-size:11px;color:#667085;margin-top:2px">${escapeHtml(r.location||"Байршил оруулаагүй")}</div>
+                ${fl&&!fl.is_resolved?`<div style="font-size:10px;color:#d97706;margin-top:2px">🚩 ${escapeHtml((fl.flag_note||"").slice(0,30))}${fl.flag_note?.length>30?"…":""}</div>`:""}
+              </td>
+              <td style="font-size:12px">${escapeHtml(r.sub_category||"—")}</td>
+              <td><span style="font-size:10px;padding:3px 9px;border-radius:20px;background:${statusBg};color:${statusColor};font-weight:800">${escapeHtml(r.status||"—")}</span></td>
+              <td><span style="font-size:11px;color:${condColor};font-weight:800">${escapeHtml(r.condition||"—")}</span></td>
+              <td style="font-size:12px">${escapeHtml(r.assigned_name||"—")}</td>
+              <td style="text-align:center;font-family:monospace;color:#667085">${r.file_count||0}</td>
+              <td style="text-align:center;font-family:monospace;color:#667085">${r.work_count||0}</td>
+              <td><div style="display:flex;gap:4px;justify-content:flex-end;flex-wrap:wrap">
+                <button class="btn secondary" style="padding:3px 8px;font-size:10px" onclick="openPassport(${r.id})">📋</button>
+                ${canCreate ? `<button class="btn secondary" style="padding:3px 8px;font-size:10px" onclick="openAssetForm(${r.id})">✏️</button>` : ""}
+                ${canDel ? `<button class="btn danger" style="padding:3px 8px;font-size:10px" onclick="confirmDeleteAsset(${r.id})">🗑</button>` : ""}
+                ${fl&&!fl.is_resolved
+                  ? `<button class="btn secondary" style="padding:3px 8px;font-size:10px;color:#16a34a" onclick="resolveAssetFlag(${fl.id})">✓</button>`
+                  : `<button class="btn secondary" style="padding:3px 8px;font-size:10px" onclick="openAssetFlagModal('assets',${r.id},'${escapeHtml((r.name||"").replace(/'/g,""))}')">🚩</button>`}
+              </div></td>
+            </tr>`;
+          }).join("") : `<tr><td colspan="10" style="text-align:center;color:#667085;padding:30px">Шилэн кабель бүртгэгдээгүй байна</td></tr>`}
+        </tbody>
+      </table>
+    </div>
+  </div>` : _cameraAssetTab === "repair" ? `
+  <div class=”panel”>
+    ${camRepairHeader}
+    <div class=”table-wrap”>
+      <table id=”camRepairTable”>
+        <thead><tr>
+          <th style=”width:40px”>#</th>
+          <th>Ажлын нэр / байршил</th>
+          <th>Хугацаа</th>
+          <th style=”text-align:center”>Явц</th>
+          <th>Төлөв</th>
+          <th>Хариуцагч</th>
+          <th style=”text-align:center”>Гүйцэтгэл</th>
+          <th style=”text-align:center”>Зураг</th>
+          <th></th>
+        </tr></thead>
+        <tbody>${camRepairRows}</tbody>
+      </table>
+    </div>
+  </div>` : _cameraAssetTab === "report" ? "" : `
+  <div class="panel">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid #e2e6ed;gap:12px;flex-wrap:wrap">
+      <div style="font-size:14px;font-weight:800">🎥 Камерын цэгийн жагсаалт <span style="font-size:12px;color:#667085;font-weight:400">(${searchedRows.length})</span></div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        ${canCreate ? `<button class="btn secondary" onclick="openAssetForm()" style="padding:6px 14px;font-size:12px">+ Шинэ цэг</button>` : ""}
+      </div>
+    </div>
+    <div style="padding:10px 18px;border-bottom:1px solid #eef2f7;background:#fbfdff">
+      ${cameraBagButtonsHtml}
+    </div>
+    <div style="padding:10px 18px;border-bottom:1px solid #eef2f7;background:#fff">
+      ${cameraConditionButtonsHtml}
+    </div>
+    <div class="table-wrap">
+      <table id="cameraAssetTable">
+        <thead><tr>
+          <th style="width:40px">#</th>
+          <th>Код</th>
+          <th>Цэг / Байршил</th>
+          <th style="text-align:center">Камерын тоо</th>
+          <th style="text-align:center">Гэмтэл</th>
+          <th>Төлөв</th>
+          <th>Нөхцөл</th>
+          <th style="text-align:center">Файл</th>
+          <th style="text-align:center">Ажил</th>
+          <th></th>
+        </tr></thead>
+        <tbody>
+          ${searchedRows.length ? searchedRows.map((r,i) => {
+            const rowCondition = cameraConditionOf(r);
+            const conditionStyle = {
+              "Засварлах": ["#fff7ed", "#d97706", "#fed7aa"],
+              "Хэвийн": ["#f0fdf4", "#16a34a", "#bbf7d0"],
+              "Татан буулгах": ["#fef2f2", "#dc2626", "#fecaca"],
+              "Нүүлгэх": ["#eff6ff", "#2563eb", "#bfdbfe"],
+            }[rowCondition] || ["#fff", "#475569", "#dbe3ef"];
+            const statusBg = r.status === "Идэвхтэй" ? "#dcfce7" : r.status === "Засварт" ? "#fff7ed" : "#f1f5f9";
+            const statusColor = r.status === "Идэвхтэй" ? "#16a34a" : r.status === "Засварт" ? "#d97706" : "#475569";
+            const fl = flagMap.get(`assets_${r.id}`);
+            const camCount = cameraCountOf(r);
+            const brokenCount = cameraBrokenCountOf(r);
+            const rowStatus = r.status === "Идэвхгүй" ? "Идэвхгүй" : "Идэвхтэй";
+            const search = `${r.asset_code||""} ${r.name||""} ${r.location||""} ${r.assigned_name||""}`.toLowerCase();
+            const bagNo = r._camera_bag_no || cameraBagNoOf(r);
+            const bagLabel = Number(bagNo || 0) === 99 ? "Аж ахуйн нэгж" : Number(bagNo || 0) === 98 ? "Авто зам" : (bagNo ? `${bagNo}-р баг` : "");
+            const bagSelect = `<select onchange="updateCameraBag(${r.id}, this.value)"
+              style="margin-top:5px;border:1px solid #dbe3ef;border-radius:7px;padding:3px 7px;font-size:11px;font-weight:800;color:#475569;background:#fff;outline:none">
+              <option value="">Баг сонгох</option>
+              ${Array.from({ length: 11 }, (_, i) => {
+                const b = i + 1;
+                return `<option value="${b}" ${Number(bagNo || 0)===b?"selected":""}>${b}-р баг</option>`;
+              }).join("")}
+              <option value="98" ${Number(bagNo || 0)===98?"selected":""}>Авто зам</option>
+              <option value="99" ${Number(bagNo || 0)===99?"selected":""}>Аж ахуйн нэгж</option>
+            </select>`;
+            const conditionSelect = `<select onchange="updateCameraCondition(${r.id}, this.value)"
+              style="border:1px solid ${conditionStyle[2]};border-radius:8px;padding:5px 8px;font-size:11px;font-weight:800;color:${conditionStyle[1]};background:${conditionStyle[0]};outline:none;min-width:120px">
+              ${CAMERA_CONDITIONS.map(c => `<option value="${c}" ${rowCondition===c?"selected":""}>${c}</option>`).join("")}
+            </select>`;
+            return `<tr data-search="${escapeHtml(search)}" data-bag="${bagNo || ""}" style="${fl&&!fl.is_resolved?"background:#fffbeb;border-left:3px solid #d97706":""}">
+              <td style="color:#94a3b8;font-size:11px">${i+1}</td>
+              <td><span style="font-family:monospace;font-size:11px;background:#f1f5f9;padding:2px 6px;border-radius:4px">${escapeHtml(r.asset_code||"—")}</span></td>
+              <td>
+                <div style="font-weight:700;color:#1d4ed8;cursor:pointer" onclick="openPassport(${r.id})">${escapeHtml(r.name||"—")} ${bagLabel ? `<span style="font-size:10px;background:#eef2ff;color:#4338ca;border-radius:999px;padding:2px 7px;margin-left:6px;white-space:nowrap">${bagLabel}</span>` : ""}</div>
+                <div style="font-size:11px;color:#667085;margin-top:2px">${escapeHtml(r.location||"Байршил оруулаагүй")}</div>
+                ${bagSelect}
+                ${fl&&!fl.is_resolved?`<div style="font-size:10px;color:#d97706;margin-top:2px">🚩 ${escapeHtml((fl.flag_note||"").slice(0,30))}${fl.flag_note?.length>30?"…":""}</div>`:""}
+              </td>
+              <td style="text-align:center">
+                <input type="number" min="1" step="1" value="${camCount}"
+                  onchange="updateCameraCounts(${r.id}, this.value, document.getElementById('cam_broken_${r.id}')?.value || 0, document.getElementById('cam_status_${r.id}')?.value || 'Идэвхтэй')"
+                  style="width:58px;text-align:center;border:1px solid #bfdbfe;border-radius:8px;padding:4px 2px;font-weight:800;color:#0ea5e9;background:#f0f9ff">
+              </td>
+              <td style="text-align:center">
+                <input id="cam_broken_${r.id}" type="number" min="0" max="${camCount}" step="1" value="${brokenCount}"
+                  onchange="updateCameraCounts(${r.id}, ${camCount}, this.value, document.getElementById('cam_status_${r.id}')?.value || 'Идэвхтэй')"
+                  style="width:58px;text-align:center;border:1px solid ${brokenCount ? "#fed7aa" : "#d1fae5"};border-radius:8px;padding:4px 2px;font-weight:800;color:${brokenCount ? "#d97706" : "#16a34a"};background:${brokenCount ? "#fff7ed" : "#f0fdf4"}">
+              </td>
+              <td>
+                <select id="cam_status_${r.id}"
+                  onchange="updateCameraCounts(${r.id}, ${camCount}, document.getElementById('cam_broken_${r.id}')?.value || 0, this.value)"
+                  style="border:1px solid ${rowStatus==="Идэвхтэй"?"#bbf7d0":"#e2e8f0"};border-radius:8px;padding:5px 8px;font-size:11px;font-weight:800;color:${rowStatus==="Идэвхтэй"?"#16a34a":"#475569"};background:${rowStatus==="Идэвхтэй"?"#dcfce7":"#f1f5f9"};outline:none">
+                  <option ${rowStatus==="Идэвхтэй"?"selected":""}>Идэвхтэй</option>
+                  <option ${rowStatus==="Идэвхгүй"?"selected":""}>Идэвхгүй</option>
+                </select>
+              </td>
+              <td>${conditionSelect}</td>
+              <td style="text-align:center;font-family:monospace;color:#667085">${r.file_count||0}</td>
+              <td style="text-align:center;font-family:monospace;color:#667085">${r.work_count||0}</td>
+              <td><div style="display:flex;gap:4px;justify-content:flex-end;flex-wrap:wrap">
+                <button class="btn secondary" style="padding:3px 8px;font-size:10px" onclick="openPassport(${r.id})">📋</button>
+                ${canCreate ? `<button class="btn secondary" style="padding:3px 8px;font-size:10px" onclick="openAssetForm(${r.id})">✏️</button>` : ""}
+                ${canDel ? `<button class="btn danger" style="padding:3px 8px;font-size:10px" onclick="confirmDeleteAsset(${r.id})">🗑</button>` : ""}
+                ${fl&&!fl.is_resolved
+                  ? `<button class="btn secondary" style="padding:3px 8px;font-size:10px;color:#16a34a" onclick="resolveAssetFlag(${fl.id})">✓</button>`
+                  : `<button class="btn secondary" style="padding:3px 8px;font-size:10px" onclick="openAssetFlagModal('assets',${r.id},'${escapeHtml((r.name||"").replace(/'/g,""))}')">🚩</button>`}
+              </div></td>
+            </tr>`;
+          }).join("") : `<tr><td colspan="10" style="text-align:center;color:#667085;padding:30px">Камерын цэг бүртгэгдээгүй байна</td></tr>`}
+        </tbody>
+      </table>
+    </div>
+  </div>`}`;
+
+  if (_cameraAssetTab === "report") loadCameraAnalytics();
+  if (_cameraAssetTab === "repair") setTimeout(camRepairFilterTable, 0);
+  if (_cameraAssetTab === "fiber") setTimeout(() => initFiberMap(rows), 0);
+}
+
+async function loadCameraAnalytics() {
+  const box = document.getElementById("cameraAnalyticsBox");
+  if (!box) return;
+  const year = window._cameraAnalyticsYear || new Date().getFullYear();
+  let data;
+  try { data = await api(`/api/camera-analytics?year=${year}`); }
+  catch(e) { box.innerHTML = `<div style="color:#dc2626;padding:12px">Алдаа: ${escapeHtml(e.message)}</div>`; return; }
+  const fmt = n => Number(n || 0).toLocaleString("mn-MN");
+  const pct = v => v == null ? "—" : `${Number(v).toFixed(1)}%`;
+  const visibleMonths = data.months.filter(m => m.work_count || m.done_count || m.snapshot_date);
+  const maxWork = Math.max(1, ...visibleMonths.map(m => m.work_count || 0));
+  const monthRows = visibleMonths.length ? visibleMonths.map(m => `
+    <tr>
+      <td style="font-weight:800">${m.label}</td>
+      <td style="text-align:center;color:#dc2626;font-weight:800">${fmt(m.work_count)}</td>
+      <td style="text-align:center;color:#16a34a;font-weight:800">${fmt(m.done_count)}</td>
+      <td style="text-align:center;color:${m.open_count ? "#d97706" : "#16a34a"};font-weight:800">${m.snapshot_date ? fmt(m.open_count) : "—"}</td>
+      <td style="text-align:center;color:#2563eb;font-weight:800">${pct(m.availability_pct)}${m.snapshot_date ? `<div style="font-size:10px;color:#94a3b8">${m.snapshot_date}</div>` : ""}</td>
+      <td>
+        <div style="height:7px;background:#f1f5f9;border-radius:999px;overflow:hidden;min-width:120px">
+          <div style="height:100%;width:${Math.min(100, (m.work_count || 0) / maxWork * 100)}%;background:#ef4444"></div>
+        </div>
+        <div style="font-size:10px;color:#94a3b8;margin-top:3px">${m.snapshot_date ? "snapshot" : "snapshot байхгүй"}</div>
+      </td>
+    </tr>`).join("") : `<tr><td colspan="6" style="text-align:center;color:#94a3b8;padding:28px">Энэ жилд камер засварын судалгаа алга</td></tr>`;
+  const locRows = data.locations.length ? data.locations.map(r => `
+    <tr>
+      <td style="font-weight:700">${escapeHtml(r.location)}</td>
+      <td style="text-align:center">${fmt(r.work_count)}</td>
+      <td style="text-align:center;color:#16a34a;font-weight:800">${fmt(r.done_count)}</td>
+      <td style="text-align:center;color:${r.open_count ? "#d97706" : "#16a34a"};font-weight:800">${fmt(r.open_count)}</td>
+      <td style="text-align:center;font-weight:800;color:#7c3aed">${r.mttr_days == null ? "—" : `${r.mttr_days} өдөр`}</td>
+    </tr>`).join("") : `<tr><td colspan="5" style="text-align:center;color:#94a3b8;padding:24px">Байршлын мэдээлэл алга</td></tr>`;
+
+  box.innerHTML = `
+    <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px">
+      <div>
+        <div style="font-size:16px;font-weight:800;color:#1e293b">📈 Камерын засвар ба ажиллагааны жилийн судалгаа</div>
+        <div style="font-size:12px;color:#64748b;margin-top:3px">Gantt-ийн “Камер засвар” ажил болон өдөр тутмын snapshot дээр суурилсан харагдац</div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input id="cameraAnalyticsYear" class="input" type="number" min="2020" max="2100" value="${data.year}" style="width:100px;margin:0">
+        <button class="btn" style="padding:8px 14px" onclick="cameraAnalyticsReload()">Харах</button>
+        <button class="btn secondary" style="padding:8px 14px" onclick="window.print()">Хэвлэх</button>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px">
+      ${[
+        ["Камерын цэг", data.summary.points, "#2563eb", "#eff6ff"],
+        ["Нийт камер", data.summary.capacity, "#0ea5e9", "#f0f9ff"],
+        ["Гэмтэлтэй камер", data.summary.broken_cameras, "#d97706", "#fff7ed"],
+        ["Жилд бүртгэсэн", data.summary.work_count, "#dc2626", "#fef2f2"],
+        ["Жилд дууссан", data.summary.done_count, "#16a34a", "#f0fdf4"],
+        ["Нээлттэй засвар", data.summary.open_count, "#d97706", "#fff7ed"],
+        ["Хэвийн хувь", pct(data.summary.availability_pct), "#7c3aed", "#f5f3ff"],
+      ].map(c => `<div style="background:${c[3]};border-radius:10px;padding:13px 16px">
+        <div style="font-size:22px;font-weight:800;color:${c[2]};line-height:1.1">${typeof c[1] === "number" ? fmt(c[1]) : c[1]}</div>
+        <div style="font-size:11px;color:#64748b;margin-top:5px;font-weight:700">${c[0]}</div>
+      </div>`).join("")}
+    </div>
+    ${cameraAnalyticsChart(data)}
+    <div style="display:grid;grid-template-columns:minmax(0,1.25fr) minmax(320px,.75fr);gap:14px">
+      <div class="panel">
+        <div style="padding:12px 16px;border-bottom:1px solid #e2e6ed;font-size:13px;font-weight:800">Сарын явц</div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Сар</th><th style="text-align:center">Бүртгэл</th><th style="text-align:center">Дууссан</th><th style="text-align:center">Нээлттэй</th><th style="text-align:center">Хэвийн</th><th>График</th></tr></thead>
+          <tbody>${monthRows}</tbody>
+        </table></div>
+      </div>
+      <div class="panel">
+        <div style="padding:12px 16px;border-bottom:1px solid #e2e6ed;font-size:13px;font-weight:800">Байршил / MTTR</div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Байршил</th><th style="text-align:center">Ажил</th><th style="text-align:center">Дууссан</th><th style="text-align:center">Нээлттэй</th><th style="text-align:center">MTTR</th></tr></thead>
+          <tbody>${locRows}</tbody>
+        </table></div>
+      </div>
+    </div>`;
+}
+
+function cameraAnalyticsChart(data) {
+  const mode = window._cameraAnalyticsMode || "year";
+  const selectedMonth = window._cameraAnalyticsMonth || new Date().getMonth() + 1;
+  const monthKey = `${data.year}-${String(selectedMonth).padStart(2, "0")}`;
+  const sourceRows = mode === "month"
+    ? (data?.daily || []).filter(d => String(d.day || "").startsWith(monthKey))
+    : (data?.months || []);
+  const visible = sourceRows
+    .map(r => ({
+      label: mode === "month" ? String(r.day || "").slice(8) : (r.label || r.ym),
+      sub_label: mode === "month" ? String(r.day || "").slice(5) : (r.snapshot_date ? String(r.snapshot_date).slice(5) : ""),
+      work_count: Number(r.work_count || 0),
+      done_count: Number(r.done_count || 0),
+      open_count: Number(r.open_count ?? r.open_work_count ?? 0),
+      availability_pct: r.availability_pct == null ? null : Number(r.availability_pct),
+      snapshot_date: r.snapshot_date || null
+    }))
+    .filter(m => m.snapshot_date || m.work_count || m.done_count || m.open_count);
+  if (!visible.length) {
+    return `<div class="panel" style="margin-bottom:14px;padding:34px;text-align:center;color:#94a3b8;font-size:13px">
+      ${mode === "month" ? `${selectedMonth}-р сарын` : "Камерын"} график харуулах snapshot / засварын мэдээлэл алга
+    </div>`;
+  }
+
+  const W = 900, H = 300, PL = 54, PR = 70, PT = 34, PB = 48;
+  const cw = W - PL - PR;
+  const ch = H - PT - PB;
+  const maxWork = Math.max(1, ...visible.map(m => Math.max(Number(m.work_count || 0), Number(m.done_count || 0), Number(m.open_count || 0))));
+  const pctVals = visible.map(m => Number(m.availability_pct)).filter(v => Number.isFinite(v));
+  const rawMin = pctVals.length ? Math.min(...pctVals) : 95;
+  const minY = Math.max(0, Math.floor((rawMin - 3) / 5) * 5);
+  const maxY = 100;
+  const yRange = Math.max(1, maxY - minY);
+  const xOf = i => PL + (visible.length > 1 ? i / (visible.length - 1) * cw : cw / 2);
+  const yOf = v => PT + ch - ((Math.max(minY, Math.min(maxY, Number(v))) - minY) / yRange) * ch;
+  const barY = count => H - PB - (Number(count || 0) / maxWork) * 58;
+
+  let grid = "";
+  for (let v = minY; v <= maxY + 0.001; v += 5) {
+    const y = yOf(v);
+    grid += `<line x1="${PL}" y1="${y.toFixed(1)}" x2="${W-PR}" y2="${y.toFixed(1)}" stroke="#e2e6ed" stroke-width="1"/>`;
+    grid += `<text x="${PL-8}" y="${(y+4).toFixed(1)}" text-anchor="end" font-size="11" fill="#94a3b8" font-weight="700">${v}%</text>`;
+  }
+
+  const xLabels = visible.map((m, i) => `
+    <text x="${xOf(i).toFixed(1)}" y="${H-20}" text-anchor="middle" font-size="11" fill="#64748b" font-weight="800">${escapeHtml(m.label || m.ym)}</text>
+    ${m.sub_label ? `<text x="${xOf(i).toFixed(1)}" y="${H-7}" text-anchor="middle" font-size="9" fill="#94a3b8">${escapeHtml(m.sub_label)}</text>` : ""}
+  `).join("");
+
+  const bars = visible.map((m, i) => {
+    const x = xOf(i);
+    const workH = H - PB - barY(m.work_count);
+    const doneH = H - PB - barY(m.done_count);
+    const openH = H - PB - barY(m.open_count);
+    return `
+      <rect x="${(x-18).toFixed(1)}" y="${barY(m.work_count).toFixed(1)}" width="8" height="${workH.toFixed(1)}" rx="3" fill="#ef4444" opacity="0.75"/>
+      <rect x="${(x-6).toFixed(1)}" y="${barY(m.done_count).toFixed(1)}" width="8" height="${doneH.toFixed(1)}" rx="3" fill="#16a34a" opacity="0.75"/>
+      <rect x="${(x+6).toFixed(1)}" y="${barY(m.open_count).toFixed(1)}" width="8" height="${openH.toFixed(1)}" rx="3" fill="#f59e0b" opacity="0.75"/>
+    `;
+  }).join("");
+
+  const pts = visible
+    .map((m, i) => m.availability_pct == null ? null : { x: xOf(i), y: yOf(m.availability_pct), v: Number(m.availability_pct) })
+    .filter(Boolean);
+  const line = pts.length >= 2
+    ? `<path d="${pts.map((p,i)=>`${i ? "L" : "M"}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ")}" fill="none" stroke="#7c3aed" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round"/>`
+    : "";
+  const points = pts.map((p, i) => {
+    const label = i === pts.length - 1
+      ? `<text x="${(p.x+10).toFixed(1)}" y="${(p.y+4).toFixed(1)}" text-anchor="start" font-size="11" font-weight="800" fill="#7c3aed" stroke="#fff" stroke-width="5" paint-order="stroke">${p.v.toFixed(1)}%</text>`
+      : "";
+    return `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="4.8" fill="#7c3aed" stroke="#fff" stroke-width="2"/>${label}`;
+  }).join("");
+
+  const monthLabels = ["1-р сар","2-р сар","3-р сар","4-р сар","5-р сар","6-р сар","7-р сар","8-р сар","9-р сар","10-р сар","11-р сар","12-р сар"];
+  const modeBtn = (key, label) => {
+    const active = mode === key;
+    return `<button onclick="cameraAnalyticsMode('${key}')" style="padding:4px 12px;border-radius:6px;border:1.5px solid ${active?"#2563eb":"#d1d5db"};background:${active?"#2563eb":"#fff"};color:${active?"#fff":"#64748b"};font-size:12px;font-weight:700;cursor:pointer">${label}</button>`;
+  };
+  return `
+  <div class="panel" style="margin-bottom:14px">
+    <div style="padding:12px 16px;border-bottom:1px solid #e2e6ed;display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+      <div style="font-size:13px;font-weight:800">Камерын хэвийн хувь ба засварын явц</div>
+      <div style="display:flex;gap:4px">
+        ${modeBtn("year", "Жилээр")}
+        ${modeBtn("month", "Сараар")}
+      </div>
+      <div style="margin-left:auto;display:flex;gap:12px;flex-wrap:wrap;font-size:11px;color:#64748b;font-weight:700">
+        <span><i style="display:inline-block;width:16px;height:3px;background:#7c3aed;border-radius:3px;vertical-align:middle"></i> Хэвийн хувь</span>
+        <span><i style="display:inline-block;width:9px;height:9px;background:#ef4444;border-radius:2px;vertical-align:middle"></i> Бүртгэл</span>
+        <span><i style="display:inline-block;width:9px;height:9px;background:#16a34a;border-radius:2px;vertical-align:middle"></i> Дууссан</span>
+        <span><i style="display:inline-block;width:9px;height:9px;background:#f59e0b;border-radius:2px;vertical-align:middle"></i> Нээлттэй</span>
+      </div>
+    </div>
+    ${mode === "month" ? `<div style="padding:8px 16px;border-bottom:1px solid #f1f5f9;display:flex;gap:4px;flex-wrap:wrap">
+      ${monthLabels.map((label, i) => {
+        const m = i + 1;
+        const active = selectedMonth === m;
+        return `<button onclick="cameraAnalyticsMonth(${m})" style="padding:3px 10px;border-radius:5px;border:1.5px solid ${active?"#2563eb":"#e2e6ed"};background:${active?"#eff6ff":"#f8fafc"};color:${active?"#2563eb":"#475569"};font-size:12px;font-weight:${active?"800":"600"};cursor:pointer">${label}</button>`;
+      }).join("")}
+    </div>` : ""}
+    <div style="padding:14px 16px 12px">
+      <div style="font-size:12px;font-weight:700;color:#475569;margin-bottom:6px;text-align:center">${mode === "month" ? `${monthLabels[selectedMonth - 1]} — өдөр тутмын камерын хэвийн хувь` : `${data.year} он — сарын камерын хэвийн хувь`} (${minY}% - ${maxY}%)</div>
+      <svg viewBox="0 0 ${W} ${H}" style="width:100%;max-width:${W}px;display:block;margin:auto;overflow:visible">
+        <rect x="${PL}" y="${PT}" width="${cw}" height="${ch}" rx="12" fill="#fbfdff" stroke="#e8eef7" stroke-width="1.2"/>
+        ${grid}${bars}${line}${points}${xLabels}
+        <line x1="${PL}" y1="${PT}" x2="${PL}" y2="${H-PB}" stroke="#e2e6ed" stroke-width="1"/>
+        <line x1="${PL}" y1="${H-PB}" x2="${W-PR}" y2="${H-PB}" stroke="#e2e6ed" stroke-width="1"/>
+      </svg>
+    </div>
+  </div>`;
+}
+
+function cameraAnalyticsReload() {
+  window._cameraAnalyticsYear = parseInt(document.getElementById("cameraAnalyticsYear")?.value) || new Date().getFullYear();
+  loadCameraAnalytics();
+}
+
+function cameraAnalyticsMode(mode) {
+  window._cameraAnalyticsMode = mode === "month" ? "month" : "year";
+  if (!window._cameraAnalyticsMonth) window._cameraAnalyticsMonth = new Date().getMonth() + 1;
+  loadCameraAnalytics();
+}
+
+function cameraAnalyticsMonth(month) {
+  window._cameraAnalyticsMode = "month";
+  window._cameraAnalyticsMonth = Math.max(1, Math.min(12, Number(month || 1)));
+  loadCameraAnalytics();
+}
 
 // ── Улсын үзлэг, тооллого ────────────────────────────────────
 
@@ -2824,7 +4155,7 @@ async function openInvReport(sid) {
       <div style="font-size:12px;color:#94a3b8">${session.start_date||""} — ${session.end_date||"2026-08-31"}</div>
     </div>
 
-    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:20px">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:20px">
       <div style="background:#eff6ff;border-radius:10px;padding:14px;text-align:center">
         <div style="font-size:10px;color:#2563eb;font-weight:600;letter-spacing:.08em;margin-bottom:4px">НИЙТ ХӨРӨНГӨ</div>
         <div style="font-size:28px;font-weight:800;color:#1d4ed8">${total}</div>
@@ -2845,7 +4176,7 @@ async function openInvReport(sid) {
       </div>
     </div>
 
-    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:20px">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;margin-bottom:20px">
       ${INV_STATUSES.slice(1).map(s => {
         const sd = summaryMap[s.key] || { cnt:0, total_price:0 };
         return `<div style="background:${s.bg};border:1px solid ${s.color}33;border-radius:10px;padding:12px;display:flex;align-items:center;gap:10px">
@@ -2936,12 +4267,15 @@ function invPrintReport() {
 Object.assign(window, {
   assets, filterAssets,
   slAssets, slHubAsset, sl_asset_road, sl_asset_ger, sl_asset_tower, sl_asset_signal, sl_asset_panel,
-  camera_assets,
+  camera_assets, cameraAssetTab, cameraAssetSearch, cameraAssetBagFilter, cameraConditionFilter, camRepairFilterTable, updateCameraCounts, updateCameraBag, updateCameraCondition, cameraAnalyticsReload,
+  cameraAnalyticsMode, cameraAnalyticsMonth,
+  startFiberDraw, cancelFiberDraw, saveFiberDraw, deleteFiberRoute, setFiberGpsTarget, toggleFiberCameraMoveMode,
+  toggleFiberCameraLayer, pickFiberCameraGps,
   openAssetFlagModal, closeAssetFlagModal, saveAssetFlag, resolveAssetFlag,
   openTrafficSignalJournal, openTrafficSignalCheck, closeTrafficSignalModal,
   saveTrafficSignalLog, checkTrafficSignalAt,
   deleteGerRow, deleteSlPointRow,
-  openAssetForm, closeAssetForm, saveAsset,
+  openAssetForm, closeAssetForm, saveAsset, importPanelsFromMeters,
   openGerForm, closeGerForm, saveGerForm,
   openSlForm, closeSlForm, saveSlForm,
   openPassport, closePassport, switchPassportTab, loadAssetSafetyRisks,

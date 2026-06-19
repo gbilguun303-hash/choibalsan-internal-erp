@@ -1,5 +1,6 @@
 const express = require("express");
 const crypto = require("crypto");
+const fs = require("fs");
 const { run, all, get, auth, audit, upload } = require("../db");
 const { requirePermission } = require("../middleware/roles");
 
@@ -95,11 +96,11 @@ router.get("/trainings", auth, async (req, res) => {
 router.post("/trainings", auth, requirePermission("hr_write"), async (req, res) => {
   const b = req.body;
   const r = await run(
-    `INSERT INTO trainings(title,type,category,trainer,location,start_date,end_date,hours,budget,description,status,created_by)
-     VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+    `INSERT INTO trainings(title,type,category,trainer,location,start_date,end_date,hours,budget,material_url,description,status,created_by)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [b.title, b.type||"Дотоод", b.category||"", b.trainer||"", b.location||"",
      b.start_date||"", b.end_date||"", Number(b.hours||0), Number(b.budget||0),
-     b.description||"", b.status||"Төлөвлөгдсөн", req.user.id]
+     b.material_url||"", b.description||"", b.status||"Төлөвлөгдсөн", req.user.id]
   );
   await audit(req.user.id, "CREATE", "trainings", r.id, b.title);
   res.json({ id: r.id });
@@ -114,6 +115,23 @@ router.put("/trainings/:id", auth, requirePermission("hr_write"), async (req, re
      b.description||"", b.status||"Төлөвлөгдсөн", req.params.id]
   );
   res.json({ ok: true });
+});
+
+router.post("/trainings/:id/material", auth, requirePermission("hr_write"), upload.single("material"), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "Материал файл олдсонгүй" });
+  const allowed = new Set([
+    "application/pdf",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ]);
+  if (!allowed.has(req.file.mimetype)) {
+    fs.unlink(req.file.path, () => {});
+    return res.status(400).json({ error: "Зөвхөн PDF эсвэл PowerPoint материал upload хийнэ үү" });
+  }
+  const url = "/uploads/" + req.file.filename;
+  await run("UPDATE trainings SET material_url=? WHERE id=?", [url, req.params.id]);
+  await audit(req.user.id, "UPLOAD", "trainings", req.params.id, "training material");
+  res.json({ url });
 });
 
 router.delete("/trainings/:id", auth, requirePermission("hr_write"), async (req, res) => {

@@ -6,7 +6,10 @@ const bcrypt  = require("bcryptjs");
 const path    = require("path");
 
 const DB_FILE  = path.join(__dirname, "..", "data", "app.db");
-const PASSWORD = "Choibalsan2026";
+const PASSWORD = process.env.SEED_USER_PASSWORD;
+if (!PASSWORD || PASSWORD.length < 12) {
+  throw new Error("SEED_USER_PASSWORD (minimum 12 characters) is required.");
+}
 
 const USERS = [
   { username: "director",   full_name: "Батсүх Гэрэлт-Од",       role: "director",      position: "Захирал",               register_no: "ПЮ80061073", address: "10-р баг 26-54 тоот",    phone: "99582070", department: "Захиргаа"   },

@@ -40,24 +40,26 @@ const ROLE_HELP = {
 };
 
 window._roleSearch = window._roleSearch || "";
-window._roleLoginFilter = window._roleLoginFilter || "login";
+window._roleLoginFilter = window._roleLoginFilter || "all";
 window._roleRoleFilter = window._roleRoleFilter || "";
 let _stab = "org";
+
+function regDigits(value) {
+  return String(value || "").replace(/\D/g, "");
+}
 
 async function settings() {
   const isDirector = state.me.role === "director";
   _stab = _stab || "org";
 
   const TABS = [
-    { key: "org",        icon: "🏢", label: "Байгууллага" },
-    { key: "roles",      icon: "👥", label: "Хэрэглэгчийн эрх" },
-    { key: "workcats",   icon: "🏷", label: "Ажлын категориуд" },
-    { key: "assetcats",  icon: "🏗", label: "Хөрөнгийн ангилал" },
-    { key: "display",    icon: "🎨", label: "Дэлгэц" },
+    { key: "org",   icon: "🏢", label: "Байгууллага" },
+    { key: "roles", icon: "🔐", label: "Нэвтрэх эрх" },
   ];
+  if (!TABS.some(t => t.key === _stab)) _stab = "org";
 
   main.innerHTML = `
-  <div style="max-width:900px">
+  <div style="max-width:1120px">
     <div style="margin-bottom:18px">
       <h1 style="margin:0 0 3px;font-size:20px">⚙️ Тохиргоо</h1>
       <div style="font-size:12px;color:#667085">ERP системийн үндсэн тохиргоо · ${new Date().toLocaleDateString("mn-MN")}</div>
@@ -86,11 +88,11 @@ async function settings() {
       b.style.color        = t.key === tab ? "#fff"    : "#667085";
       b.style.borderBottom = t.key === tab ? "2px solid #2563eb" : "2px solid transparent";
     });
-    const fns = { org: stabOrg, roles: stabRoles, workcats: stabWorkCats, assetcats: stabAssetCats, display: stabDisplay };
+    const fns = { org: stabOrg, roles: stabRoles };
     if (fns[tab]) fns[tab]();
   };
 
-  const fns = { org: stabOrg, roles: stabRoles, workcats: stabWorkCats, assetcats: stabAssetCats, display: stabDisplay };
+  const fns = { org: stabOrg, roles: stabRoles };
   if (fns[_stab]) fns[_stab]();
 }
 
@@ -100,8 +102,7 @@ async function stabOrg() {
   const isDirector = state.me.role === "director";
   let cfg = {};
   try {
-    const rows = await api("/api/org-settings");
-    rows.forEach(r => { cfg[r.key] = r.value; });
+    cfg = await api("/api/org-settings");
   } catch(e) {}
 
   const field = (key, label, placeholder, type="text") => `
@@ -183,7 +184,7 @@ async function stabRoles() {
   }).length;
   const filteredUsers = users.filter(u => {
     const q = (window._roleSearch || "").trim().toLowerCase();
-    const hay = [u.full_name, u.username, u.email, u.position, u.department, u.role].join(" ").toLowerCase();
+    const hay = [u.full_name, u.username, u.phone, u.register_no, u.email, u.position, u.department, u.role].join(" ").toLowerCase();
     const matchesSearch = !q || hay.includes(q);
     const matchesLogin = window._roleLoginFilter === "all"
       || (window._roleLoginFilter === "login" && canLogin(u))
@@ -217,13 +218,13 @@ async function stabRoles() {
     <div class="panel" style="padding:0;overflow:hidden">
       <div style="padding:16px 20px;border-bottom:1px solid #e2e6ed;display:flex;align-items:center;justify-content:space-between">
         <div>
-          <div style="font-size:14px;font-weight:700">👥 Хэрэглэгчийн эрх удирдлага</div>
-          <div style="font-size:11px;color:#94a3b8;margin-top:2px">Ажилчдын бүртгэлээс тусдаа зөвхөн нэвтрэх эрх, role, нэмэлт module эрхийг удирдана</div>
+          <div style="font-size:14px;font-weight:700">🔐 Нэвтрэх эрхийн тохиргоо</div>
+          <div style="font-size:11px;color:#94a3b8;margin-top:2px">Username нь утасны дугаар, password нь РД-ийн үсгийг хассан тоо байхаар бөглөгдсөн</div>
         </div>
-        ${isDirector ? `<div style="font-size:11px;color:#94a3b8">Эрхийг өөрчилсний дараа хэрэглэгч дахин нэвтрэх шаардлагатай</div>` : ""}
+        ${isDirector ? `<div style="font-size:11px;color:#94a3b8">Username, утас, РД, password-ийг эндээс засна</div>` : ""}
       </div>
       <div style="padding:12px 16px;border-bottom:1px solid #eef2f7;display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:#fbfdff">
-        <input class="input" value="${escapeHtml(window._roleSearch)}" placeholder="Нэр, нэвтрэх нэр, албан тушаал хайх..."
+        <input class="input" value="${escapeHtml(window._roleSearch)}" placeholder="Нэр, утас, РД, албан тушаал хайх..."
           oninput="window._roleSearch=this.value;stabRoles()" style="max-width:320px;margin:0">
         <select class="input" onchange="window._roleLoginFilter=this.value;stabRoles()" style="width:150px;margin:0">
           <option value="login" ${window._roleLoginFilter==="login"?"selected":""}>Нэвтрэх эрхтэй</option>
@@ -241,7 +242,7 @@ async function stabRoles() {
           <tr style="background:#f8f9fb">
             <th style="padding:10px 16px;text-align:left;font-size:11px;color:#667085;font-weight:600">АЖИЛТАН</th>
             <th style="padding:10px 16px;text-align:left;font-size:11px;color:#667085;font-weight:600">ХЭЛТЭС / АЛБАН ТУШААЛ</th>
-            <th style="padding:10px 16px;text-align:left;font-size:11px;color:#667085;font-weight:600">НЭВТРЭХ НЭР</th>
+            <th style="padding:10px 16px;text-align:left;font-size:11px;color:#667085;font-weight:600">НЭВТРЭХ МЭДЭЭЛЭЛ</th>
             <th style="padding:10px 16px;text-align:left;font-size:11px;color:#667085;font-weight:600">ЭРХ / ROLE</th>
             ${isDirector ? `<th style="padding:10px 16px;text-align:left;font-size:11px;color:#667085;font-weight:600">ҮЙЛДЭЛ</th>` : ""}
           </tr>
@@ -270,7 +271,10 @@ async function stabRoles() {
                 <div style="font-size:12px;color:#344054">${escapeHtml(u.department||'—')}</div>
                 <div style="font-size:11px;color:#94a3b8">${escapeHtml(u.position||'—')}</div>
               </td>
-              <td style="padding:10px 16px;font-size:12px;color:#667085;font-family:monospace">${escapeHtml(u.username||'')}</td>
+              <td style="padding:10px 16px;font-size:12px;color:#667085">
+                <div style="font-family:monospace;font-weight:700;color:#2563eb">${escapeHtml(u.username||'')}</div>
+                <div style="font-size:11px;color:#94a3b8">Утас: ${escapeHtml(u.phone||'—')} · РД: ${escapeHtml(u.register_no||'—')}</div>
+              </td>
               <td style="padding:10px 16px">
                 <span style="display:inline-block;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:700;background:${roleColor(u.role)}18;color:${roleColor(u.role)};border:1px solid ${roleColor(u.role)}33">
                   ${roleLabel(u.role)}
@@ -318,6 +322,32 @@ async function stabRoles() {
               ${ROLES.map(r => `<option value="${r.value}">${r.label}</option>`).join("")}
             </select>
             <div id="permRoleHelp" style="font-size:11px;color:#64748b;margin-top:8px"></div>
+          </div>
+
+          <div style="margin-bottom:18px;padding:14px 16px;background:#fff;border-radius:10px;border:1px solid #e2e6ed">
+            <div style="font-size:12px;font-weight:700;color:#344054;margin-bottom:10px">🔑 Нэвтрэх нэр / password</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+              <label style="display:block">
+                <span style="display:block;font-size:11px;font-weight:700;color:#64748b;margin-bottom:4px">Username</span>
+                <input id="permUsername" class="input" placeholder="Утасны дугаар" style="margin:0">
+              </label>
+              <label style="display:block">
+                <span style="display:block;font-size:11px;font-weight:700;color:#64748b;margin-bottom:4px">Утас</span>
+                <input id="permPhone" class="input" placeholder="Утасны дугаар" style="margin:0">
+              </label>
+              <label style="display:block">
+                <span style="display:block;font-size:11px;font-weight:700;color:#64748b;margin-bottom:4px">Регистрийн дугаар</span>
+                <input id="permRegisterNo" class="input" placeholder="ЖЯ80061073" oninput="permSyncRegPasswordHint()" style="margin:0">
+              </label>
+              <label style="display:block">
+                <span style="display:block;font-size:11px;font-weight:700;color:#64748b;margin-bottom:4px">Шинэ password</span>
+                <div style="display:flex;gap:6px">
+                  <input id="permNewPassword" class="input" type="text" placeholder="Хоосон бол солихгүй" style="margin:0">
+                  <button class="btn secondary sm" onclick="permFillPasswordFromRegister()" style="white-space:nowrap">РД тоо</button>
+                </div>
+              </label>
+            </div>
+            <div id="permPasswordHint" style="font-size:11px;color:#64748b;margin-top:8px"></div>
           </div>
 
           <label style="margin-bottom:18px;padding:12px 14px;border:1px solid #e2e8f0;border-radius:10px;display:flex;align-items:flex-start;gap:10px;cursor:pointer">
@@ -405,6 +435,22 @@ async function stabRoles() {
     }
   };
 
+  window.permSyncRegPasswordHint = () => {
+    const reg = document.getElementById("permRegisterNo")?.value || "";
+    const digits = regDigits(reg);
+    const hint = document.getElementById("permPasswordHint");
+    if (hint) hint.textContent = digits
+      ? `РД-ийн үсгийг хасаад password болгох утга: ${digits}`
+      : "РД бөглөгдвөл password-ийг РД-ийн тооноос автоматаар бөглөж болно.";
+  };
+
+  window.permFillPasswordFromRegister = () => {
+    const digits = regDigits(document.getElementById("permRegisterNo")?.value || "");
+    const input = document.getElementById("permNewPassword");
+    if (input) input.value = digits;
+    permSyncRegPasswordHint();
+  };
+
   window.openPermModal = (userId) => {
     const u = users.find(x => x.id === userId);
     if (!u) return;
@@ -412,10 +458,19 @@ async function stabRoles() {
     document.getElementById("permModalTitle").textContent = `⚙️ Эрх тохируулах — ${u.full_name}`;
     const roleSelect = document.getElementById("permRoleSelect");
     if (roleSelect) roleSelect.value = u.role;
+    const usernameInput = document.getElementById("permUsername");
+    if (usernameInput) usernameInput.value = u.username || "";
+    const phoneInput = document.getElementById("permPhone");
+    if (phoneInput) phoneInput.value = u.phone || "";
+    const regInput = document.getElementById("permRegisterNo");
+    if (regInput) regInput.value = u.register_no || "";
+    const passInput = document.getElementById("permNewPassword");
+    if (passInput) passInput.value = "";
     const canLogin = document.getElementById("permCanLogin");
     if (canLogin) canLogin.checked = Number(u.can_login) !== 0;
     permSyncRoleHelp();
     permSyncLoginControls();
+    permSyncRegPasswordHint();
 
     let perms = {};
     try { perms = JSON.parse(u.permissions || "{}"); } catch(e) {}
@@ -456,6 +511,18 @@ async function stabRoles() {
     if (!u) return;
     const newRole = document.getElementById("permRoleSelect")?.value || u.role;
     const allowLogin = document.getElementById("permCanLogin")?.checked || false;
+    const username = (document.getElementById("permUsername")?.value || "").trim();
+    const phone = (document.getElementById("permPhone")?.value || "").trim();
+    const registerNo = (document.getElementById("permRegisterNo")?.value || "").trim();
+    const newPassword = document.getElementById("permNewPassword")?.value || "";
+    if (!username) {
+      toast("Username хоосон байж болохгүй");
+      return;
+    }
+    if (newPassword && newPassword.length < 8) {
+      toast("Password хамгийн багадаа 8 тэмдэгт байна");
+      return;
+    }
 
     const perms = {};
     if (allowLogin) {
@@ -471,11 +538,12 @@ async function stabRoles() {
         method: "PUT",
         body: JSON.stringify({
           full_name:   u.full_name,
+          username,
           role:        newRole,
           position:    u.position    || "",
-          register_no: u.register_no || "",
+          register_no: registerNo,
           address:     u.address     || "",
-          phone:       u.phone       || "",
+          phone,
           department:  u.department  || "",
           email:       u.email       || null,
           active:      u.active !== 0,
@@ -483,6 +551,12 @@ async function stabRoles() {
           permissions: JSON.stringify(perms),
         })
       });
+      if (newPassword) {
+        await api(`/api/users/${_permUserId}/password`, {
+          method: "PUT",
+          body: JSON.stringify({ new_password: newPassword })
+        });
+      }
       toast(`${u.full_name} — эрх шинэчлэгдлээ ✓`);
       document.getElementById("permModal").style.display = "none";
       stabRoles();

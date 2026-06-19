@@ -1,3 +1,4 @@
+require("express-async-errors");
 const express = require("express");
 const cors    = require("cors");
 const bcrypt  = require("bcryptjs");
@@ -28,7 +29,8 @@ function loadEnvFile() {
 loadEnvFile();
 
 const APP_PORT   = process.env.PORT       || 4000;
-const JWT_SECRET = process.env.JWT_SECRET || "CHANGE_THIS_SECRET_2026_CHOIBALSAN";
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) throw new Error("JWT_SECRET is required. Configure it in .env.");
 const UPLOAD_DIR = path.join(__dirname, "uploads");
 const APP_URL    = process.env.APP_URL    || `http://localhost:${APP_PORT}`;
 const EMAIL_FROM = process.env.EMAIL_FROM || '"Чойбалсан хөгжил ERP" <choibalsankhugjil@gmail.com>';
@@ -38,7 +40,10 @@ fs.mkdirSync(path.join(__dirname, "data"), { recursive: true });
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 // db.js opens the SQLite connection — require after directories exist
-const { run, all, get } = require("./db");
+const { run, all, get, auth } = require("./db");
+const { saveLightingDailySnapshot } = require("./services/lighting_snapshots");
+const { saveCameraDailySnapshot } = require("./services/camera_snapshots");
+const { startCronJobs } = require("./services/cron");
 
 // ── Email / SMTP setup (optional — configure via .env) ───────
 let _nm = null; try { _nm = require("nodemailer"); } catch(e) {}
@@ -58,7 +63,21 @@ app.use("/uploads", express.static(UPLOAD_DIR, {
     res.setHeader("Content-Disposition", "inline");
   }
 }));
-app.use(express.static(path.join(__dirname, "public")));
+app.use(express.static(path.join(__dirname, "public"), {
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith(".html")) {
+      // HTML хуучирахгүй байлгах — Cloudflare болон browser кэшлэхгүй
+      res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+      res.setHeader("Pragma", "no-cache");
+      res.setHeader("Surrogate-Control", "no-store");
+    } else if (filePath.endsWith(".js") || filePath.endsWith(".css")) {
+      // JS/CSS-д version query байгаа тул browser кэшлэж болно, Cloudflare кэшлэхгүй
+      res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+      res.setHeader("Pragma", "no-cache");
+      res.setHeader("Surrogate-Control", "no-store");
+    }
+  }
+}));
 
 function lanBaseUrl() {
   if (process.env.APP_URL) return process.env.APP_URL.replace(/\/+$/, "");
@@ -93,6 +112,7 @@ async function initDb() {
     phone         TEXT,
     department    TEXT,
     email         TEXT,
+    avatar_url    TEXT,
     active        INTEGER DEFAULT 1,
     created_at    TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
@@ -113,11 +133,13 @@ async function initDb() {
   await run(`ALTER TABLE users ADD COLUMN job_category       TEXT DEFAULT 'Захиргааны ажилтан'`).catch(() => {});
   await run(`ALTER TABLE users ADD COLUMN education          TEXT`).catch(() => {});
   await run(`ALTER TABLE users ADD COLUMN gender             TEXT`).catch(() => {});
+  await run(`ALTER TABLE users ADD COLUMN work_condition     TEXT`).catch(() => {});
   await run(`ALTER TABLE users ADD COLUMN birthdate          TEXT`).catch(() => {});
   await run(`ALTER TABLE users ADD COLUMN nationality        TEXT DEFAULT 'Монгол'`).catch(() => {});
   await run(`ALTER TABLE users ADD COLUMN emergency_contact  TEXT`).catch(() => {});
   await run(`ALTER TABLE users ADD COLUMN permissions        TEXT`).catch(() => {});
   await run(`ALTER TABLE users ADD COLUMN can_login          INTEGER DEFAULT 1`).catch(() => {});
+  await run(`ALTER TABLE users ADD COLUMN avatar_url         TEXT`).catch(() => {});
 
   await run(`CREATE TABLE IF NOT EXISTS hr_history (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -170,6 +192,7 @@ async function initDb() {
   await run(`ALTER TABLE asset_events ADD COLUMN start_date      TEXT`).catch(() => {});
   await run(`ALTER TABLE asset_events ADD COLUMN end_date        TEXT`).catch(() => {});
   await run(`ALTER TABLE asset_events ADD COLUMN asset_id        INTEGER`).catch(() => {});
+  await run(`ALTER TABLE asset_events ADD COLUMN asset_ids       TEXT DEFAULT '[]'`).catch(() => {});
   await run(`ALTER TABLE asset_events ADD COLUMN asset_code      TEXT`).catch(() => {});
   await run(`ALTER TABLE asset_events ADD COLUMN confirm_status     TEXT DEFAULT ''`).catch(() => {});
   await run(`ALTER TABLE asset_events ADD COLUMN confirmed_by       INTEGER`).catch(() => {});
@@ -177,6 +200,7 @@ async function initDb() {
   await run(`ALTER TABLE asset_events ADD COLUMN reject_note        TEXT DEFAULT ''`).catch(() => {});
   await run(`ALTER TABLE asset_events ADD COLUMN confirm_note       TEXT DEFAULT ''`).catch(() => {});
   await run(`ALTER TABLE asset_events ADD COLUMN confirm_image_url  TEXT DEFAULT ''`).catch(() => {});
+  await run(`ALTER TABLE asset_events ADD COLUMN confirm_signature_code TEXT DEFAULT ''`).catch(() => {});
   await run(`ALTER TABLE asset_events ADD COLUMN habea_pre_status   TEXT DEFAULT ''`).catch(() => {});
   await run(`ALTER TABLE asset_events ADD COLUMN habea_pre_by       INTEGER`).catch(() => {});
   await run(`ALTER TABLE asset_events ADD COLUMN habea_pre_at       TEXT`).catch(() => {});
@@ -187,6 +211,28 @@ async function initDb() {
   await run(`ALTER TABLE asset_events ADD COLUMN habea_post_by      INTEGER`).catch(() => {});
   await run(`ALTER TABLE asset_events ADD COLUMN habea_post_at      TEXT`).catch(() => {});
   await run(`ALTER TABLE asset_events ADD COLUMN habea_post_note    TEXT DEFAULT ''`).catch(() => {});
+  await run(`ALTER TABLE asset_events ADD COLUMN habea_post_signature_code TEXT DEFAULT ''`).catch(() => {});
+  await run(`ALTER TABLE asset_events ADD COLUMN submitted_by       INTEGER`).catch(() => {});
+  await run(`ALTER TABLE asset_events ADD COLUMN submitted_at       TEXT`).catch(() => {});
+  await run(`ALTER TABLE asset_events ADD COLUMN submit_note        TEXT DEFAULT ''`).catch(() => {});
+
+  await run(`CREATE TABLE IF NOT EXISTS engineer_monthly_reports (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    year            INTEGER NOT NULL,
+    month           INTEGER NOT NULL,
+    summary_note    TEXT DEFAULT '',
+    issue_note      TEXT DEFAULT '',
+    resource_note   TEXT DEFAULT '',
+    next_plan_note  TEXT DEFAULT '',
+    conclusion_note TEXT DEFAULT '',
+    created_by      INTEGER NOT NULL,
+    updated_by      INTEGER,
+    created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(year, month, created_by),
+    FOREIGN KEY(created_by) REFERENCES users(id),
+    FOREIGN KEY(updated_by) REFERENCES users(id)
+  )`);
 
   await run(`CREATE TABLE IF NOT EXISTS work_executions (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -206,6 +252,18 @@ async function initDb() {
     FOREIGN KEY(created_by)  REFERENCES users(id)
   )`);
 
+  // Parent work progress is always the rounded average of its executions.
+  await run(`UPDATE asset_events
+    SET progress = COALESCE((
+      SELECT ROUND(AVG(CASE
+        WHEN e.progress < 0 THEN 0
+        WHEN e.progress > 100 THEN 100
+        ELSE e.progress
+      END))
+      FROM work_executions e
+      WHERE e.work_log_id = asset_events.id
+    ), 0)`);
+
   await run(`CREATE TABLE IF NOT EXISTS execution_photos (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     execution_id INTEGER NOT NULL,
@@ -224,6 +282,23 @@ async function initDb() {
     uploaded_by INTEGER NOT NULL,
     uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(work_log_id) REFERENCES asset_events(id)
+  )`);
+
+  await run(`CREATE TABLE IF NOT EXISTS work_planned_materials (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    work_log_id INTEGER NOT NULL,
+    material_id INTEGER NOT NULL,
+    qty         REAL NOT NULL DEFAULT 0,
+    unit        TEXT DEFAULT '',
+    unit_price  REAL DEFAULT 0,
+    note        TEXT DEFAULT '',
+    status      TEXT DEFAULT 'Төлөвлөсөн',
+    created_by  INTEGER,
+    created_at  TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at  TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(work_log_id) REFERENCES asset_events(id),
+    FOREIGN KEY(material_id) REFERENCES wh_materials(id),
+    FOREIGN KEY(created_by) REFERENCES users(id)
   )`);
 
   // ── Warehouse ─────────────────────────────────────────────
@@ -309,6 +384,9 @@ async function initDb() {
     record_type TEXT NOT NULL,
     start_date  TEXT NOT NULL,
     end_date    TEXT,
+    work_hours  REAL,
+    leave_hours REAL,
+    overtime_hours REAL,
     note        TEXT,
     created_by  INTEGER NOT NULL,
     created_at  TEXT DEFAULT CURRENT_TIMESTAMP
@@ -329,6 +407,11 @@ async function initDb() {
     created_by  INTEGER NOT NULL,
     created_at  TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
+
+  await run(`ALTER TABLE correspondence ADD COLUMN ai_summary TEXT DEFAULT ''`).catch(() => {});
+  await run(`ALTER TABLE correspondence ADD COLUMN response_draft TEXT DEFAULT ''`).catch(() => {});
+  await run(`ALTER TABLE correspondence ADD COLUMN response_type TEXT DEFAULT ''`).catch(() => {});
+  await run(`ALTER TABLE correspondence ADD COLUMN response_sent_at TEXT DEFAULT ''`).catch(() => {});
 
   // ── Compliance documents (licenses, permits, certificates) ──
   await run(`CREATE TABLE IF NOT EXISTS documents (
@@ -394,7 +477,154 @@ async function initDb() {
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
   )`).catch(() => {});
 
+  await run(`CREATE TABLE IF NOT EXISTS hse_report_snapshots (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    period_type  TEXT NOT NULL,
+    year         INTEGER NOT NULL,
+    month        INTEGER,
+    title        TEXT NOT NULL,
+    data_json    TEXT NOT NULL,
+    source       TEXT DEFAULT 'manual',
+    status       TEXT DEFAULT 'draft',
+    created_by   INTEGER NOT NULL,
+    created_at   TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at   TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(period_type, year, month)
+  )`).catch(() => {});
+  await run(`ALTER TABLE hse_report_snapshots ADD COLUMN source TEXT DEFAULT 'manual'`).catch(() => {});
+  await run(`ALTER TABLE hse_report_snapshots ADD COLUMN status TEXT DEFAULT 'draft'`).catch(() => {});
+
   // ── Vehicles & Maintenance ─────────────────────────────────
+  await run(`CREATE TABLE IF NOT EXISTS safety_trainings (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    training_date     TEXT NOT NULL,
+    title             TEXT NOT NULL,
+    trainer           TEXT DEFAULT '',
+    audience          TEXT DEFAULT '',
+    participant_count INTEGER DEFAULT 0,
+    topic             TEXT DEFAULT '',
+    result_note       TEXT DEFAULT '',
+    file_url          TEXT DEFAULT '',
+    status            TEXT DEFAULT 'Төлөвлөсөн',
+    created_by        INTEGER,
+    created_at        TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at        TEXT DEFAULT CURRENT_TIMESTAMP
+  )`).catch(() => {});
+  await run(`ALTER TABLE safety_trainings ADD COLUMN file_url TEXT DEFAULT ''`).catch(() => {});
+
+  await run(`CREATE TABLE IF NOT EXISTS safety_training_ack (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    training_id    INTEGER NOT NULL,
+    user_id        INTEGER NOT NULL,
+    acknowledged_at TEXT,
+    signature_code TEXT DEFAULT '',
+    note           TEXT DEFAULT '',
+    created_at     TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(training_id, user_id),
+    FOREIGN KEY(training_id) REFERENCES safety_trainings(id),
+    FOREIGN KEY(user_id) REFERENCES users(id)
+  )`).catch(() => {});
+
+  await run(`CREATE TABLE IF NOT EXISTS safety_procedures (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    doc_no        TEXT DEFAULT '',
+    title         TEXT NOT NULL,
+    category      TEXT DEFAULT '',
+    approved_date TEXT DEFAULT '',
+    owner         TEXT DEFAULT '',
+    version       TEXT DEFAULT '1.0',
+    status        TEXT DEFAULT 'Идэвхтэй',
+    file_url      TEXT DEFAULT '',
+    note          TEXT DEFAULT '',
+    created_by    INTEGER,
+    created_at    TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at    TEXT DEFAULT CURRENT_TIMESTAMP
+  )`).catch(() => {});
+
+  await run(`CREATE TABLE IF NOT EXISTS safety_instructions (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    instruction_date TEXT NOT NULL,
+    type             TEXT NOT NULL DEFAULT 'Ээлжит',
+    title            TEXT NOT NULL,
+    body             TEXT DEFAULT '',
+    file_url         TEXT DEFAULT '',
+    target_scope     TEXT DEFAULT 'all',
+    status           TEXT DEFAULT 'Идэвхтэй',
+    created_by       INTEGER,
+    created_at       TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at       TEXT DEFAULT CURRENT_TIMESTAMP
+  )`).catch(() => {});
+
+  await run(`CREATE TABLE IF NOT EXISTS safety_instruction_ack (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    instruction_id INTEGER NOT NULL,
+    user_id        INTEGER NOT NULL,
+    acknowledged_at TEXT,
+    signature_code TEXT DEFAULT '',
+    note           TEXT DEFAULT '',
+    created_at     TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(instruction_id, user_id),
+    FOREIGN KEY(instruction_id) REFERENCES safety_instructions(id),
+    FOREIGN KEY(user_id) REFERENCES users(id)
+  )`).catch(() => {});
+
+  await run(`CREATE TABLE IF NOT EXISTS safety_route_plans (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    route_date     TEXT NOT NULL,
+    title          TEXT NOT NULL,
+    route_type     TEXT DEFAULT '',
+    start_point    TEXT DEFAULT '',
+    end_point      TEXT DEFAULT '',
+    vehicle        TEXT DEFAULT '',
+    driver         TEXT DEFAULT '',
+    workers        TEXT DEFAULT '',
+    risk_points    TEXT DEFAULT '',
+    control_note   TEXT DEFAULT '',
+    status         TEXT DEFAULT 'Батлагдсан',
+    created_by     INTEGER,
+    created_at     TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at     TEXT DEFAULT CURRENT_TIMESTAMP
+  )`).catch(() => {});
+
+  await run(`CREATE TABLE IF NOT EXISTS safety_accidents (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    accident_date    TEXT NOT NULL,
+    accident_time    TEXT DEFAULT '',
+    location         TEXT DEFAULT '',
+    employee_id      INTEGER,
+    employee_name    TEXT DEFAULT '',
+    accident_type    TEXT DEFAULT '',
+    severity         TEXT DEFAULT '',
+    injury           TEXT DEFAULT '',
+    cause            TEXT DEFAULT '',
+    witness          TEXT DEFAULT '',
+    immediate_action TEXT DEFAULT '',
+    commission_note  TEXT DEFAULT '',
+    status           TEXT DEFAULT 'Нээлттэй',
+    created_by       INTEGER,
+    created_at       TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at       TEXT DEFAULT CURRENT_TIMESTAMP
+  )`).catch(() => {});
+
+  await run(`CREATE TABLE IF NOT EXISTS safety_occupational_diseases (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    detected_date   TEXT NOT NULL,
+    employee_id     INTEGER,
+    employee_name   TEXT DEFAULT '',
+    position        TEXT DEFAULT '',
+    department      TEXT DEFAULT '',
+    exposure_factor TEXT DEFAULT '',
+    diagnosis       TEXT DEFAULT '',
+    medical_note    TEXT DEFAULT '',
+    disability      TEXT DEFAULT '',
+    work_limit      TEXT DEFAULT '',
+    prevention_note TEXT DEFAULT '',
+    status          TEXT DEFAULT 'Хяналтад',
+    created_by      INTEGER,
+    created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
+  )`).catch(() => {});
+
   await run(`CREATE TABLE IF NOT EXISTS vehicles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     plate_no TEXT NOT NULL,
@@ -494,9 +724,11 @@ async function initDb() {
     department TEXT,
     budget     REAL DEFAULT 0,
     status     TEXT DEFAULT 'Төлөвлөсөн',
+    note       TEXT DEFAULT '',
     created_by INTEGER NOT NULL,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
+  await run(`ALTER TABLE plans ADD COLUMN note TEXT DEFAULT ''`).catch(() => {});
 
   await run(`CREATE TABLE IF NOT EXISTS plan_items (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -513,6 +745,19 @@ async function initDb() {
     FOREIGN KEY(plan_id) REFERENCES plans(id)
   )`);
 
+  await run(`CREATE TABLE IF NOT EXISTS plan_files (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    plan_id     INTEGER NOT NULL,
+    file_type   TEXT NOT NULL DEFAULT 'document',
+    file_path   TEXT NOT NULL,
+    file_name   TEXT DEFAULT '',
+    note        TEXT DEFAULT '',
+    uploaded_by INTEGER,
+    uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(plan_id) REFERENCES plans(id),
+    FOREIGN KEY(uploaded_by) REFERENCES users(id)
+  )`);
+
   await run(`CREATE TABLE IF NOT EXISTS audit_logs (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id   INTEGER,
@@ -522,6 +767,19 @@ async function initDb() {
     detail    TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
+
+  await run(`CREATE TABLE IF NOT EXISTS notifications (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    type       TEXT NOT NULL,
+    title      TEXT NOT NULL,
+    body       TEXT DEFAULT '',
+    user_id    INTEGER,
+    dedupe_key TEXT,
+    is_read    INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
+  await run(`ALTER TABLE notifications ADD COLUMN dedupe_key TEXT`).catch(() => {});
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_dedupe ON notifications(dedupe_key) WHERE dedupe_key IS NOT NULL`).catch(() => {});
 
   // ── Finance / Нягтлан ─────────────────────────────────────
   await run(`CREATE TABLE IF NOT EXISTS cash_journal (
@@ -638,6 +896,44 @@ async function initDb() {
     updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
 
+  await run(`CREATE TABLE IF NOT EXISTS work_todos (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    module        TEXT NOT NULL DEFAULT 'general',
+    title         TEXT NOT NULL,
+    note          TEXT DEFAULT '',
+    assigned_to   INTEGER NOT NULL,
+    assigned_by   INTEGER,
+    work_date     TEXT NOT NULL,
+    work_time     TEXT DEFAULT '',
+    due_date      TEXT,
+    todo_type     TEXT NOT NULL DEFAULT 'work',
+    privacy       TEXT NOT NULL DEFAULT 'private',
+    priority      TEXT NOT NULL DEFAULT 'normal',
+    status        TEXT NOT NULL DEFAULT 'todo',
+    created_by    INTEGER NOT NULL,
+    completed_at  TEXT,
+    created_at    TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at    TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(assigned_to) REFERENCES users(id),
+    FOREIGN KEY(assigned_by) REFERENCES users(id),
+    FOREIGN KEY(created_by)  REFERENCES users(id)
+  )`);
+  await run(`ALTER TABLE work_todos ADD COLUMN todo_type TEXT NOT NULL DEFAULT 'work'`).catch(() => {});
+  await run(`ALTER TABLE work_todos ADD COLUMN privacy TEXT NOT NULL DEFAULT 'private'`).catch(() => {});
+  await run(`ALTER TABLE work_todos ADD COLUMN work_time TEXT DEFAULT ''`).catch(() => {});
+  await run(`ALTER TABLE work_todos ADD COLUMN work_end_time TEXT DEFAULT ''`).catch(() => {});
+  await run(`CREATE TABLE IF NOT EXISTS work_todo_notes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    todo_id     INTEGER NOT NULL,
+    user_id     INTEGER NOT NULL,
+    note        TEXT NOT NULL,
+    created_at  TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(todo_id) REFERENCES work_todos(id),
+    FOREIGN KEY(user_id) REFERENCES users(id)
+  )`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_work_todos_module_month ON work_todos(module, work_date)`).catch(() => {});
+  await run(`CREATE INDEX IF NOT EXISTS idx_work_todos_assigned ON work_todos(assigned_to, work_date)`).catch(() => {});
+
   // Extend material_moves with new columns
   await run(`ALTER TABLE material_moves ADD COLUMN item_id    INTEGER`).catch(() => {});
   await run(`ALTER TABLE material_moves ADD COLUMN supplier   TEXT DEFAULT ''`).catch(() => {});
@@ -669,6 +965,7 @@ async function initDb() {
     txn_type      TEXT NOT NULL,
     material_id   INTEGER NOT NULL REFERENCES wh_materials(id),
     qty           REAL NOT NULL,
+    unit          TEXT DEFAULT '',
     unit_price    REAL DEFAULT 0,
     amount        REAL DEFAULT 0,
     doc_no        TEXT DEFAULT '',
@@ -676,12 +973,18 @@ async function initDb() {
     received_by   TEXT DEFAULT '',
     work_ref      TEXT DEFAULT '',
     asset_ref     TEXT DEFAULT '',
+    work_log_id   INTEGER,
     notes         TEXT DEFAULT '',
     created_by    INTEGER,
     created_at    TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
+  await run(`ALTER TABLE wh_transactions ADD COLUMN unit TEXT DEFAULT ''`).catch(() => {});
+  await run(`ALTER TABLE wh_transactions ADD COLUMN work_log_id INTEGER`).catch(() => {});
   await run(`ALTER TABLE wh_materials ADD COLUMN min_qty REAL DEFAULT 0`).catch(() => {});
   await run(`ALTER TABLE wh_materials ADD COLUMN custodian TEXT DEFAULT ''`).catch(() => {});
+  await run(`ALTER TABLE assets ADD COLUMN bag_no INTEGER`).catch(() => {});
+  await run(`ALTER TABLE assets ADD COLUMN camera_count INTEGER DEFAULT 1`).catch(() => {});
+  await run(`ALTER TABLE assets ADD COLUMN camera_broken_count INTEGER DEFAULT 0`).catch(() => {});
 
   // ── Захиргаа / HR / Архив ─────────────────────────────────
   await run(`CREATE TABLE IF NOT EXISTS orders_decisions (
@@ -728,8 +1031,34 @@ async function initDb() {
     FOREIGN KEY(uploaded_by) REFERENCES users(id)
   )`);
 
+  await run(`CREATE TABLE IF NOT EXISTS legal_filter_runs (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    doc_name       TEXT NOT NULL,
+    source_type    TEXT DEFAULT 'text',
+    source_ref     TEXT DEFAULT '',
+    file_url       TEXT DEFAULT '',
+    file_name      TEXT DEFAULT '',
+    input_text     TEXT DEFAULT '',
+    summary        TEXT DEFAULT '',
+    result_json    TEXT DEFAULT '[]',
+    risk_count     INTEGER DEFAULT 0,
+    conflict_count INTEGER DEFAULT 0,
+    unclear_count  INTEGER DEFAULT 0,
+    duplicate_count INTEGER DEFAULT 0,
+    suggestion_count INTEGER DEFAULT 0,
+    status         TEXT DEFAULT 'Шинжилсэн',
+    created_by     INTEGER NOT NULL,
+    created_at     TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(created_by) REFERENCES users(id)
+  )`);
+  await run(`ALTER TABLE legal_filter_runs ADD COLUMN improved INTEGER DEFAULT 0`).catch(() => {});
+  await run(`ALTER TABLE legal_filter_runs ADD COLUMN status TEXT DEFAULT 'Шинэ'`).catch(() => {});
+
   // Add status column to hr_records for leave approval tracking
   await run(`ALTER TABLE hr_records ADD COLUMN status TEXT DEFAULT 'Бүртгэсэн'`).catch(() => {});
+  await run(`ALTER TABLE hr_records ADD COLUMN work_hours REAL`).catch(() => {});
+  await run(`ALTER TABLE hr_records ADD COLUMN leave_hours REAL`).catch(() => {});
+  await run(`ALTER TABLE hr_records ADD COLUMN overtime_hours REAL`).catch(() => {});
   // Add counterparty column to cash_journal for organization name
   await run(`ALTER TABLE cash_journal ADD COLUMN counterparty TEXT DEFAULT ''`).catch(() => {});
   // Add register_no column to cash_journal for org register/tax ID
@@ -743,6 +1072,7 @@ async function initDb() {
   await run(`ALTER TABLE cash_journal ADD COLUMN econ_category   TEXT DEFAULT ''`).catch(() => {});
   await run(`ALTER TABLE cash_journal ADD COLUMN transferor      TEXT DEFAULT ''`).catch(() => {});
   await run(`ALTER TABLE cash_journal ADD COLUMN receiver        TEXT DEFAULT ''`).catch(() => {});
+  await run(`ALTER TABLE cash_journal ADD COLUMN imported_balance REAL`).catch(() => {});
 
   // ── Байгуулллагын тохиргоо (org settings) ─────────────────
   await run(`CREATE TABLE IF NOT EXISTS org_settings (
@@ -866,6 +1196,91 @@ async function initDb() {
     raw_payload  TEXT
   )`);
 
+  await run(`CREATE TABLE IF NOT EXISTS iot_meter_readings (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    dev_eui          TEXT NOT NULL,
+    device_name      TEXT,
+    application_name TEXT,
+    voltage          REAL,
+    current          REAL,
+    power            REAL,
+    energy           REAL,
+    frequency        REAL,
+    power_factor     REAL,
+    ua               REAL,
+    ub               REAL,
+    uc               REAL,
+    ia               REAL,
+    ib               REAL,
+    ic               REAL,
+    total_power      REAL,
+    ep               REAL,
+    pf               REAL,
+    do_state         TEXT,
+    di_state         TEXT,
+    rssi             REAL,
+    snr              REAL,
+    gateway_id       TEXT,
+    raw_payload      TEXT NOT NULL,
+    received_at      TEXT NOT NULL,
+    created_at       TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
+  await run(`ALTER TABLE iot_meter_readings ADD COLUMN ua REAL`).catch(() => {});
+  await run(`ALTER TABLE iot_meter_readings ADD COLUMN ub REAL`).catch(() => {});
+  await run(`ALTER TABLE iot_meter_readings ADD COLUMN uc REAL`).catch(() => {});
+  await run(`ALTER TABLE iot_meter_readings ADD COLUMN ia REAL`).catch(() => {});
+  await run(`ALTER TABLE iot_meter_readings ADD COLUMN ib REAL`).catch(() => {});
+  await run(`ALTER TABLE iot_meter_readings ADD COLUMN ic REAL`).catch(() => {});
+  await run(`ALTER TABLE iot_meter_readings ADD COLUMN total_power REAL`).catch(() => {});
+  await run(`ALTER TABLE iot_meter_readings ADD COLUMN ep REAL`).catch(() => {});
+  await run(`ALTER TABLE iot_meter_readings ADD COLUMN pf REAL`).catch(() => {});
+  await run(`CREATE INDEX IF NOT EXISTS idx_iot_meter_readings_dev_seen
+             ON iot_meter_readings(dev_eui, received_at DESC, id DESC)`).catch(() => {});
+
+  await run(`CREATE TABLE IF NOT EXISTS iot_audit_logs (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL,
+    dev_eui    TEXT,
+    payload    TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    source     TEXT NOT NULL DEFAULT 'chirpstack_http_integration'
+  )`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_iot_audit_logs_dev_created
+             ON iot_audit_logs(dev_eui, created_at DESC)`).catch(() => {});
+  await run(`CREATE TRIGGER IF NOT EXISTS trg_iot_audit_logs_no_update
+             BEFORE UPDATE ON iot_audit_logs
+             BEGIN
+               SELECT RAISE(ABORT, 'iot_audit_logs is immutable');
+             END`).catch(() => {});
+  await run(`CREATE TRIGGER IF NOT EXISTS trg_iot_audit_logs_no_delete
+             BEFORE DELETE ON iot_audit_logs
+             BEGIN
+               SELECT RAISE(ABORT, 'iot_audit_logs is immutable');
+             END`).catch(() => {});
+
+  await run(`CREATE TABLE IF NOT EXISTS iot_device_commands (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    dev_eui             TEXT NOT NULL,
+    device_model        TEXT,
+    action              TEXT NOT NULL,
+    f_port              INTEGER NOT NULL,
+    payload_hex         TEXT NOT NULL,
+    status              TEXT NOT NULL,
+    chirpstack_response TEXT,
+    txack_response      TEXT,
+    ack_response        TEXT,
+    requested_by        INTEGER,
+    requested_by_role   TEXT,
+    requested_at        TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
+  await run(`ALTER TABLE iot_device_commands ADD COLUMN device_model TEXT`).catch(() => {});
+  await run(`ALTER TABLE iot_device_commands ADD COLUMN txack_response TEXT`).catch(() => {});
+  await run(`ALTER TABLE iot_device_commands ADD COLUMN ack_response TEXT`).catch(() => {});
+  await run(`ALTER TABLE iot_device_commands ADD COLUMN requested_by INTEGER`).catch(() => {});
+  await run(`ALTER TABLE iot_device_commands ADD COLUMN requested_by_role TEXT`).catch(() => {});
+  await run(`CREATE INDEX IF NOT EXISTS idx_iot_device_commands_dev_requested
+             ON iot_device_commands(dev_eui, requested_at DESC, id DESC)`).catch(() => {});
+
   // ── Гэрэлтүүлгийн цагийн тохируулгын түүх ───────────────────
   await run(`CREATE TABLE IF NOT EXISTS light_schedule_logs (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -984,11 +1399,13 @@ async function initDb() {
     end_date    TEXT DEFAULT '',
     hours       INTEGER DEFAULT 0,
     budget      REAL DEFAULT 0,
+    material_url TEXT DEFAULT '',
     description TEXT DEFAULT '',
     status      TEXT DEFAULT 'Төлөвлөгдсөн',
     created_by  INTEGER,
     created_at  TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
+  await run(`ALTER TABLE trainings ADD COLUMN material_url TEXT DEFAULT ''`).catch(() => {});
 
   await run(`CREATE TABLE IF NOT EXISTS training_attendees (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1051,6 +1468,7 @@ async function initDb() {
     name              TEXT NOT NULL,
     category          TEXT NOT NULL,
     sub_category      TEXT,
+    bag_no            INTEGER,
     location          TEXT,
     gps_lat           REAL,
     gps_lng           REAL,
@@ -1062,6 +1480,8 @@ async function initDb() {
     purchase_price    REAL DEFAULT 0,
     current_value     REAL DEFAULT 0,
     useful_life_years INTEGER DEFAULT 10,
+    camera_count      INTEGER DEFAULT 1,
+    camera_broken_count INTEGER DEFAULT 0,
     description       TEXT,
     specs             TEXT,
     notes             TEXT,
@@ -1071,6 +1491,22 @@ async function initDb() {
     FOREIGN KEY(assigned_to) REFERENCES users(id),
     FOREIGN KEY(created_by)  REFERENCES users(id)
   )`);
+  await run(`ALTER TABLE assets ADD COLUMN bag_no INTEGER`).catch(() => {});
+  await run(`ALTER TABLE assets ADD COLUMN camera_count INTEGER DEFAULT 1`).catch(() => {});
+  await run(`ALTER TABLE assets ADD COLUMN camera_broken_count INTEGER DEFAULT 0`).catch(() => {});
+
+  const cameraBagBackfillRows = await all(
+    `SELECT id,name,location FROM assets
+     WHERE category='Камер' AND (bag_no IS NULL OR bag_no=0)`
+  ).catch(() => []);
+  for (const row of cameraBagBackfillRows) {
+    const text = `${row.name || ""} ${row.location || ""}`.toLowerCase();
+    const match = text.match(/(?:^|\D)(\d{1,2})\s*(?:-?\s*р|дугаар)?\s*баг\b/u);
+    const bagNo = match ? Number(match[1]) : 0;
+    if (bagNo >= 1 && bagNo <= 11) {
+      await run("UPDATE assets SET bag_no=? WHERE id=?", [bagNo, row.id]).catch(() => {});
+    }
+  }
 
   await run(`CREATE TABLE IF NOT EXISTS asset_files (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1084,6 +1520,24 @@ async function initDb() {
     FOREIGN KEY(asset_id)    REFERENCES assets(id),
     FOREIGN KEY(uploaded_by) REFERENCES users(id)
   )`);
+
+  await run(`CREATE TABLE IF NOT EXISTS fiber_routes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    route_type  TEXT DEFAULT '',
+    core_count  INTEGER DEFAULT 0,
+    color       TEXT DEFAULT '',
+    status      TEXT DEFAULT 'Идэвхтэй',
+    note        TEXT DEFAULT '',
+    geojson     TEXT NOT NULL,
+    length_m    REAL DEFAULT 0,
+    created_by  INTEGER,
+    created_at  TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at  TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(created_by) REFERENCES users(id)
+  )`);
+  await run(`ALTER TABLE fiber_routes ADD COLUMN core_count INTEGER DEFAULT 0`).catch(() => {});
+  await run(`ALTER TABLE fiber_routes ADD COLUMN color TEXT DEFAULT ''`).catch(() => {});
 
   // ── Улсын үзлэг, тооллого ────────────────────────────────
   await run(`CREATE TABLE IF NOT EXISTS asset_inventory_sessions (
@@ -1160,15 +1614,19 @@ async function initDb() {
   // ── Seed users (only on empty DB) ────────────────────────
   const count = await get("SELECT COUNT(*) as c FROM users");
   if (count.c === 0) {
+    const initialPassword = process.env.INITIAL_USER_PASSWORD;
+    if (!initialPassword || initialPassword.length < 12) {
+      throw new Error("INITIAL_USER_PASSWORD (minimum 12 characters) is required when creating the first ERP users.");
+    }
     const users = [
-      ["director",   "Choibalsan@2026!", "Батсүх Гэрэлт-Од",        "director",      "Захирал",                 "ПЮ80061073", "10-р баг 26-54 тоот",    "99582070", "Захиргаа",   "btskhgereltod@gmail.com"],
-      ["engineer",   "Choibalsan@2026!", "Ганболд Билгүүн",           "chief_engineer","Ерөнхий инженер",          "ЖЮ97050218", "6-р баг 25-55",          "89961997", "Инженер",    "engineer@choibalsan.mn"],
-      ["hr",         "Choibalsan@2026!", "Болд Ундраа",               "hr",            "Хүний нөөцийн ажилтан",   "ЖЗ86061607", "6-р баг 70-23 тоот",     "88304224", "Хүний нөөц", "hr@choibalsan.mn"],
-      ["safety",     "Choibalsan@2026!", "Батболд Энхболор",          "safety",        "ХАБЭА-н ажилтан",         "ЖЬ87121868", "8-р баг 58-49 тоот",     "80824303", "ХАБЭА",      "safety@choibalsan.mn"],
-      ["accountant", "Choibalsan@2026!", "Цэрэнжав Тунгалаг",         "accountant",    "Нягтлан бодогч",          "ЖЯ81050100", "9-р баг 17-23",          "99006010", "Санхүү",     "accountant@choibalsan.mn"],
-      ["network",    "Choibalsan@2026!", "Балданпүрэв Мөнх-Эрдэнэ",  "engineer",      "Сүлжээний инженер",       "ЖЯ94051213", "7-р баг 31-10 тоот",     "99588085", "Камер",      "network@choibalsan.mn"],
-      ["electric",   "Choibalsan@2026!", "Амаржаргал Цэлмэг",         "engineer",      "Цахилгааны инженер",      "ТБ99121004", "10-р баг, зангиат 1-25", "80990144", "Цахилгаан",  "electric@choibalsan.mn"],
-      ["store",      "Choibalsan@2026!", "Дамдинжав Пүрэвсүрэн",     "storekeeper",   "Нярав",                   "ЖЛ82031809", "7-р баг Гарден 217-4",   "91111762", "Аж ахуй",    "store@choibalsan.mn"]
+      ["director",   initialPassword, "Батсүх Гэрэлт-Од",        "director",      "Захирал",                 "ПЮ80061073", "10-р баг 26-54 тоот",    "99582070", "Захиргаа",   "btskhgereltod@gmail.com"],
+      ["engineer",   initialPassword, "Ганболд Билгүүн",           "chief_engineer","Ерөнхий инженер",          "ЖЮ97050218", "6-р баг 25-55",          "89961997", "Инженер",    "engineer@choibalsan.mn"],
+      ["hr",         initialPassword, "Болд Ундраа",               "hr",            "Хүний нөөцийн ажилтан",   "ЖЗ86061607", "6-р баг 70-23 тоот",     "88304224", "Хүний нөөц", "hr@choibalsan.mn"],
+      ["safety",     initialPassword, "Батболд Энхболор",          "safety",        "ХАБЭА-н ажилтан",         "ЖЬ87121868", "8-р баг 58-49 тоот",     "80824303", "ХАБЭА",      "safety@choibalsan.mn"],
+      ["accountant", initialPassword, "Цэрэнжав Тунгалаг",         "accountant",    "Нягтлан бодогч",          "ЖЯ81050100", "9-р баг 17-23",          "99006010", "Санхүү",     "accountant@choibalsan.mn"],
+      ["network",    initialPassword, "Балданпүрэв Мөнх-Эрдэнэ",  "camera_engineer","Сүлжээний инженер",      "ЖЯ94051213", "7-р баг 31-10 тоот",     "99588085", "Камер",      "network@choibalsan.mn"],
+      ["electric",   initialPassword, "Амаржаргал Цэлмэг",         "engineer",      "Цахилгааны инженер",      "ТБ99121004", "10-р баг, зангиат 1-25", "80990144", "Цахилгаан",  "electric@choibalsan.mn"],
+      ["store",      initialPassword, "Дамдинжав Пүрэвсүрэн",     "storekeeper",   "Нярав",                   "ЖЛ82031809", "7-р баг Гарден 217-4",   "91111762", "Аж ахуй",    "store@choibalsan.mn"]
     ];
     for (const u of users) {
       await run(
@@ -1177,6 +1635,19 @@ async function initDb() {
         [u[0], bcrypt.hashSync(u[1], 10), u[2], u[3], u[4], u[5], u[6], u[7], u[8], u[9]]);
     }
   }
+
+  // ── Unified monthly report snapshots ─────────────────────
+  await run(`CREATE TABLE IF NOT EXISTS unified_report_snapshots (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    year        INTEGER NOT NULL,
+    month       INTEGER NOT NULL,
+    title       TEXT,
+    data_json   TEXT NOT NULL,
+    created_by  INTEGER,
+    created_at  TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at  TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(year, month)
+  )`).catch(() => {});
 
   // ── Report schedules ──────────────────────────────────────
   await run(`CREATE TABLE IF NOT EXISTS report_schedules (
@@ -1499,6 +1970,12 @@ async function initDb() {
   try { await run("ALTER TABLE sl_ger_inventory ADD COLUMN meter_no TEXT"); } catch(_) {}
   try { await run("ALTER TABLE sl_ger_inventory ADD COLUMN meter_point_id INTEGER"); } catch(_) {}
   try { await run("ALTER TABLE sl_ger_inventory ADD COLUMN install_date TEXT"); } catch(_) {}
+  try { await run("ALTER TABLE sl_ger_inventory ADD COLUMN needs_poles INTEGER DEFAULT 0"); } catch(_) {}
+  // Phase 2: Asset bridge — link sl_points and sl_ger_inventory to assets registry
+  try { await run("ALTER TABLE sl_points ADD COLUMN asset_id INTEGER REFERENCES assets(id)"); } catch(_) {}
+  try { await run("ALTER TABLE sl_ger_inventory ADD COLUMN asset_id INTEGER REFERENCES assets(id)"); } catch(_) {}
+  try { await run("ALTER TABLE work_executions ADD COLUMN gps_lat REAL"); } catch(_) {}
+  try { await run("ALTER TABLE work_executions ADD COLUMN gps_lng REAL"); } catch(_) {}
 
   await run(`CREATE TABLE IF NOT EXISTS sl_ger_photos (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1556,6 +2033,20 @@ async function initDb() {
     FOREIGN KEY(repaired_by) REFERENCES users(id)
   )`);
   try { await run("ALTER TABLE sl_faults ADD COLUMN location_type TEXT"); } catch(_) {}
+
+  await run(`CREATE TABLE IF NOT EXISTS sl_daily_status (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_date    TEXT NOT NULL,
+    category         TEXT NOT NULL,
+    total_count      INTEGER NOT NULL DEFAULT 0,
+    broken_count     INTEGER NOT NULL DEFAULT 0,
+    availability_pct REAL NOT NULL DEFAULT 100,
+    fault_count      INTEGER NOT NULL DEFAULT 0,
+    source           TEXT DEFAULT 'auto',
+    created_at       TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at       TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(snapshot_date, category)
+  )`);
 
   // Гэрлэн дохионы цагийн нарийвчлалтай төлөвийн журнал
   await run(`CREATE TABLE IF NOT EXISTS traffic_signal_status_logs (
@@ -1674,6 +2165,26 @@ async function initDb() {
   )`);
   await run(`CREATE INDEX IF NOT EXISTS idx_assistant_dev_requests_status ON assistant_dev_requests(status,created_at)`).catch(() => {});
 
+  await run(`CREATE TABLE IF NOT EXISTS mcp_tool_audit (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id      INTEGER,
+    role         TEXT NOT NULL DEFAULT '',
+    tool_name    TEXT NOT NULL,
+    query_params TEXT NOT NULL DEFAULT '{}',
+    result_count INTEGER NOT NULL DEFAULT 0,
+    success      INTEGER NOT NULL DEFAULT 0,
+    error_code   TEXT,
+    ip_address   TEXT,
+    session_id   TEXT,
+    duration_ms  INTEGER NOT NULL DEFAULT 0,
+    created_at   TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id) REFERENCES users(id)
+  )`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_mcp_tool_audit_created
+             ON mcp_tool_audit(created_at)`).catch(() => {});
+  await run(`CREATE INDEX IF NOT EXISTS idx_mcp_tool_audit_user_tool
+             ON mcp_tool_audit(user_id,tool_name,created_at)`).catch(() => {});
+
   // ── assistant_dev_requests column migrations ──────────────────
   for (const col of [
     `ALTER TABLE assistant_dev_requests ADD COLUMN priority TEXT DEFAULT 'medium'`,
@@ -1719,6 +2230,39 @@ async function initDb() {
   } catch (e) {
     console.error("[kb seed]", e.message);
   }
+
+  // ── Internal Chat ─────────────────────────────────────────────
+  await run(`CREATE TABLE IF NOT EXISTS chat_messages (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    sender_id           INTEGER NOT NULL,
+    recipient_id        INTEGER,
+    message             TEXT,
+    image_url           TEXT,
+    tagged_work_log_id  INTEGER,
+    tagged_execution_id INTEGER,
+    created_at          TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(sender_id)    REFERENCES users(id),
+    FOREIGN KEY(recipient_id) REFERENCES users(id)
+  )`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_chat_messages_created ON chat_messages(created_at)`).catch(() => {});
+  await run(`CREATE TABLE IF NOT EXISTS chat_message_reactions (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id INTEGER NOT NULL,
+    user_id    INTEGER NOT NULL,
+    emoji      TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(message_id, user_id),
+    FOREIGN KEY(message_id) REFERENCES chat_messages(id),
+    FOREIGN KEY(user_id) REFERENCES users(id)
+  )`);
+  await run(`CREATE INDEX IF NOT EXISTS idx_chat_reactions_message
+             ON chat_message_reactions(message_id)`).catch(() => {});
+
+  await run(`CREATE TABLE IF NOT EXISTS user_last_seen (
+    user_id   INTEGER PRIMARY KEY,
+    last_seen TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id) REFERENCES users(id)
+  )`);
 }
 
 async function cleanupAssistantLogs() {
@@ -1749,16 +2293,28 @@ app.use((req, _res, next) => {
 });
 
 // ── Login ─────────────────────────────────────────────────────
+function compactPhone(value) {
+  return String(value || "").replace(/\D/g, "");
+}
+
 app.post("/api/login", async (req, res) => {
-  const loginId = ((req.body.email || req.body.username) || "").trim().toLowerCase();
+  const loginRaw = ((req.body.email || req.body.username) || "").trim();
+  const loginId = loginRaw.toLowerCase();
+  const loginDigits = compactPhone(loginRaw);
   const { password } = req.body;
   if (!loginId || !password)
     return res.status(400).json({ error: "Мэдэлэл дутуу байна" });
   const user = await get(
-    "SELECT * FROM users WHERE (LOWER(email)=? OR LOWER(username)=?) AND active=1 AND COALESCE(can_login,1)=1",
-    [loginId, loginId]);
+    `SELECT * FROM users
+     WHERE active=1 AND COALESCE(can_login,1)=1
+       AND (
+         LOWER(email)=?
+         OR LOWER(username)=?
+         OR REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(phone,''),' ',''),'-',''),'(',''),')',''),'+','')=?
+       )`,
+    [loginId, loginId, loginDigits]);
   if (!user || !bcrypt.compareSync(password, user.password_hash))
-    return res.status(401).json({ error: "И-мэйл эсвэл нууц үг буруу байна" });
+    return res.status(401).json({ error: "Утасны дугаар эсвэл нууц үг буруу байна" });
   const token = jwt.sign(
     { id: user.id, username: user.username, role: user.role, full_name: user.full_name, permissions: user.permissions || null },
     JWT_SECRET, { expiresIn: "12h" });
@@ -1766,7 +2322,7 @@ app.post("/api/login", async (req, res) => {
     token,
     user: { id: user.id, username: user.username, full_name: user.full_name,
             role: user.role, position: user.position, department: user.department, email: user.email,
-            permissions: user.permissions || null }
+            avatar_url: user.avatar_url || null, permissions: user.permissions || null }
   });
 });
 
@@ -1826,6 +2382,29 @@ app.get("/api/public-base-url", (_req, res) => {
   res.json({ baseUrl: lanBaseUrl() });
 });
 
+// ── Notifications ─────────────────────────────────────────────
+
+app.get("/api/notifications", auth, async (req, res) => {
+  const rows = await all(
+    `SELECT * FROM notifications
+     WHERE (user_id IS NULL OR user_id=?) AND is_read=0
+     ORDER BY id DESC LIMIT 30`,
+    [req.user.id]
+  );
+  res.json(rows);
+});
+
+app.patch("/api/notifications/:id/read", auth, async (req, res) => {
+  await run("UPDATE notifications SET is_read=1 WHERE id=? AND (user_id IS NULL OR user_id=?)",
+    [req.params.id, req.user.id]);
+  res.json({ ok: true });
+});
+
+app.post("/api/notifications/read-all", auth, async (req, res) => {
+  await run("UPDATE notifications SET is_read=1 WHERE user_id IS NULL OR user_id=?", [req.user.id]);
+  res.json({ ok: true });
+});
+
 // ── Route modules ─────────────────────────────────────────────
 app.use("/api", require("./routes/assets"));
 app.use("/api", require("./routes/operations"));
@@ -1844,13 +2423,57 @@ app.use("/api", require("./routes/streetlights"));
 app.use("/api", require("./routes/electricity"));
 app.use("/api", require("./routes/lighting_schedule"));
 app.use("/api", require("./routes/lora"));
+app.use("/api", require("./routes/iot"));
 app.use("/api", require("./routes/hr_extended"));
+app.use("/api", require("./routes/chat"));
+app.use("/api", require("./routes/ai_test"));
+require("./services/mcp/server").installMcpRoutes(app);
+
+// ── Global error handler ──────────────────────────────────────
+app.use((err, req, res, _next) => {
+  console.error(`[server error] ${req.method} ${req.path}:`, err.message);
+  if (res.headersSent) return;
+  res.status(500).json({ error: "Серверийн алдаа гарлаа" });
+});
 
 // ── SPA fallback (must be last) ───────────────────────────────
 app.get("*", (_, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 
+function localDateKey(d = new Date()) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function startDailySnapshotScheduler() {
+  let lastLightingSnapshotDate = "";
+  let lastCameraSnapshotDate = "";
+  const capture = async (source = "daily_scheduler") => {
+    const date = localDateKey();
+    if (date !== lastLightingSnapshotDate || source !== "daily_scheduler") {
+      await saveLightingDailySnapshot(date, source);
+      lastLightingSnapshotDate = date;
+    }
+    if (date !== lastCameraSnapshotDate || source !== "daily_scheduler") {
+      await saveCameraDailySnapshot(date, source);
+      lastCameraSnapshotDate = date;
+    }
+  };
+  capture("server_start").catch(e => console.warn("[snapshot] daily:", e.message));
+  setInterval(() => {
+    capture("daily_scheduler").catch(e => console.warn("[snapshot] daily:", e.message));
+  }, 60 * 60 * 1000).unref();
+}
+
+process.on("unhandledRejection", (reason) => {
+  console.error("[unhandledRejection]", reason);
+});
+
 initDb().then(() => {
   cleanupAssistantLogs();
+  startDailySnapshotScheduler();
+  startCronJobs();
   setInterval(cleanupAssistantLogs, 24 * 60 * 60 * 1000).unref();
   app.listen(APP_PORT, "0.0.0.0", () => {
     console.log(`Choibalsan internal app running: http://0.0.0.0:${APP_PORT}`);

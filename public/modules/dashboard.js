@@ -240,8 +240,424 @@ function renderDevRequestStats(rows) {
     </div>`;
 }
 
+function renderAiSummary(aiSummary) {
+  if (!aiSummary) return "";
+  const badge = (icon, label, val, isAlert) => {
+    const danger = isAlert && typeof val === "number" && val > 0;
+    const bg = danger ? "rgba(239,68,68,.18)" : "rgba(255,255,255,.08)";
+    const nc = danger ? "#fca5a5" : "#94a3b8";
+    const vc = danger ? "#f87171" : "#f8fafc";
+    return `<div style="background:${bg};border-radius:10px;padding:7px 11px;text-align:center;min-width:74px;cursor:default">
+      <div style="font-size:15px">${icon}</div>
+      <div style="font-size:16px;font-weight:800;color:${vc};line-height:1.2">${val ?? "—"}</div>
+      <div style="font-size:9px;color:${nc};margin-top:2px;white-space:nowrap">${label}</div>
+    </div>`;
+  };
+  const chips = ["Өнөөдрийн тойм", "Нээлттэй гэмтэл хэдэн байна?", "Агуулахын нөөц байна уу?", "Өнөөдөр хэн ирсэн?"];
+  return `
+    <div style="background:linear-gradient(135deg,#0f172a 0%,#1e3a5f 100%);border-radius:14px;padding:14px 18px;margin:16px 0">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:12px">
+        <div>
+          <div style="font-size:13px;font-weight:800;color:#fff">💬 AI Өдрийн тойм &nbsp;<span style="font-weight:400;font-size:11px;color:#94a3b8">· ${aiSummary.today}</span></div>
+          <div style="font-size:11px;color:#cbd5e1;margin-top:2px">Системийн өнөөдрийн байдал — асуулт дарж илгээх</div>
+        </div>
+        <button onclick="toggleErpAssistant(true)" style="border:1px solid rgba(255,255,255,.2);background:rgba(255,255,255,.1);color:#e2e8f0;border-radius:8px;padding:5px 14px;cursor:pointer;font-size:11px;font-weight:700">ERP туслахтай ярих →</button>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px">
+        ${badge("⚡", "Гэрлэн гэмтэл", aiSummary.open_light_faults, true)}
+        ${badge("🔧", "Толгой гэмтэл", aiSummary.broken_heads, true)}
+        ${badge("🛠", "Нээлттэй ажил", aiSummary.open_work, true)}
+        ${badge("🚦", "Дохионы гэмтэл", aiSummary.traffic_issues, true)}
+        ${badge("✅", "Өнөөдөр ирсэн", aiSummary.present_today, false)}
+        ${badge("📦", "Нөөц анхааруулга", aiSummary.low_stock_items, true)}
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px">
+        ${chips.map(q => `<button onclick="toggleErpAssistant(true);askErpAssistant('${q.replace(/'/g,"\\'")}');" style="border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.07);color:#cbd5e1;border-radius:20px;padding:4px 12px;font-size:11px;cursor:pointer;transition:background .12s" onmouseover="this.style.background='rgba(255,255,255,.14)'" onmouseout="this.style.background='rgba(255,255,255,.07)'">${q}</button>`).join("")}
+      </div>
+    </div>`;
+}
+
+async function workerDashboard() {
+  const todayStr = today();
+  const year  = new Date().getFullYear();
+  const month = new Date().getMonth() + 1;
+  const daysInMonth = new Date(year, month, 0).getDate();
+  const monthStart  = `${year}-${String(month).padStart(2,'0')}-01`;
+  const monthEnd    = `${year}-${String(month).padStart(2,'0')}-${String(daysInMonth).padStart(2,'0')}`;
+
+  let gerStats = { total_ger:0, total_camhag:0, total_broken:0, sl_poles:0, sl_heads:0 };
+  try { gerStats = await api("/api/sl-ger-stats"); } catch(e) {}
+  let workerCameraStats = { points: 0, cameras: 0, broken_cameras: 0 };
+  try {
+    const r = await api("/api/camera-analytics");
+    const s = r.summary || {};
+    workerCameraStats = { points: s.points || 0, cameras: s.capacity || 0, broken_cameras: s.broken_cameras || 0 };
+  } catch(e) {}
+
+  // My monthly attendance
+  const myMonthDays = {}; // day → code
+  const myId = state.me?.id;
+  let hrRows = [];
+
+  try {
+    hrRows = await api("/api/hr-records");
+
+    // My month — iterate each day, pick latest record
+    const myRows = hrRows.filter(r => r.user_id === myId && r.start_date);
+    const myLatestByDay = {};
+    myRows.forEach(r => {
+      const rs = r.start_date.slice(0,10);
+      const re = (r.end_date || r.start_date).slice(0,10);
+      const clampS = rs < monthStart ? monthStart : rs;
+      const clampE = re > monthEnd   ? monthEnd   : re;
+      if (clampS > clampE) return;
+      for (let d = new Date(clampS); d <= new Date(clampE); d.setDate(d.getDate()+1)) {
+        const dk = d.getDate();
+        if (!myLatestByDay[dk] || r.id > myLatestByDay[dk].id) myLatestByDay[dk] = r;
+      }
+    });
+    Object.entries(myLatestByDay).forEach(([dk, r]) => {
+      const CODE_MAP = {
+        "Ажилласан":"А","Ажил тасалсан":"Т","Чөлөө":"Ч",
+        "Өвчтэй":"Ө","Ээлжийн амралт":"Э","Хоцорсон":"Х","Илүү цаг":"ИЦ"
+      };
+      myMonthDays[dk] = CODE_MAP[r.record_type] || "А";
+    });
+  } catch(e) {}
+
+  // My month summary counts
+  const myCounts = { А:0, Т:0, Ч:0, Ө:0, Э:0, Х:0, ИЦ:0 };
+  Object.values(myMonthDays).forEach(c => { if (myCounts[c] !== undefined) myCounts[c]++; });
+  const myRecordedDays = Object.keys(myMonthDays).length;
+  const todayDay = new Date().getDate();
+  const workdaysSoFar = Array.from({length: todayDay}, (_,i) => {
+    const d = new Date(year, month-1, i+1);
+    return d.getDay() !== 0 && d.getDay() !== 6;
+  }).filter(Boolean).length;
+
+  const lightPct = (() => {
+    const parts = [];
+    if (gerStats.sl_heads > 0)     parts.push((gerStats.sl_heads - (gerStats.sl_broken||0)) / gerStats.sl_heads * 100);
+    if (gerStats.total_ger > 0)    parts.push((gerStats.total_ger - (gerStats.ger_broken||0)) / gerStats.total_ger * 100);
+    if (gerStats.total_camhag > 0) parts.push((gerStats.total_camhag - (gerStats.camhag_broken||0)) / gerStats.total_camhag * 100);
+    if (!parts.length) return 100;
+    return (parts.reduce((s,v)=>s+v,0) / parts.length).toFixed(1);
+  })();
+  const lightCol = lightPct >= 90 ? '#16a34a' : lightPct >= 70 ? '#d97706' : '#dc2626';
+  const lightBg  = lightPct >= 90 ? '#f0fdf4' : lightPct >= 70 ? '#fff7ed' : '#fef2f2';
+
+  let myTasks = [];
+  try { myTasks = await api("/api/my-tasks"); } catch(e) {}
+  let workLogs = [];
+  try { workLogs = await api("/api/work-logs"); } catch(e) {}
+  const thisMonthPrefix = `${year}-${String(month).padStart(2,'0')}`;
+  const thisMonthLogs = workLogs.filter(r => (r.work_date || '').startsWith(thisMonthPrefix));
+
+  // Salary calculation
+  let myPay = null;
+  try { myPay = await api("/api/my-salary"); } catch(e) {}
+  const prStart = month === 1 ? new Date(year-1, 11, 21) : new Date(year, month-2, 21);
+  const prEnd   = new Date(year, month-1, 20);
+  const fmtPrD  = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  let payWorkedDays = 0;
+  if (myPay) {
+    const prDayMap = new Map();
+    hrRows.filter(r => r.user_id === myId && r.start_date).forEach(r => {
+      const rs = new Date(r.start_date.slice(0,10));
+      const re = new Date((r.end_date || r.start_date).slice(0,10));
+      const cs = rs > prStart ? rs : prStart;
+      const ce = re < prEnd   ? re : prEnd;
+      if (cs > ce) return;
+      for (let d = new Date(cs); d <= ce; d.setDate(d.getDate()+1)) {
+        const key = fmtPrD(d);
+        const prev = prDayMap.get(key);
+        if (!prev || r.id > prev.id) prDayMap.set(key, r);
+      }
+    });
+    payWorkedDays = [...prDayMap.values()].filter(r => ["Ажилласан","Хоцорсон","Илүү цаг"].includes(r.record_type)).length;
+  }
+  const tenureRateFn = y => { const v = Math.floor(Number(y||0)); return v>=16?25:v>=11?20:v>=9?15:v>=7?10:v>=4?8:v>=2?5:0; };
+  const paySal       = Number(myPay?.salary || 0);
+  const paySkillRt   = Math.min(25, Math.max(0, Math.floor(Number(myPay?.skill_allowance_rate||0))));
+  const paySkill     = paySal * paySkillRt / 100;
+  const payTenureYr  = Math.floor(Number(myPay?.tenure_years || 0));
+  const payTenureRt  = tenureRateFn(payTenureYr);
+  const payTenure    = paySal * payTenureRt / 100;
+  const payMeal      = payWorkedDays * 10000;
+  const payBase      = paySal + paySkill + payTenure + payMeal;
+  const payEmpNd     = Math.round(payBase * 0.115);
+  const payHaot      = Math.round((payBase - payEmpNd) * 0.10);
+  const payNet       = Math.round(payBase) - payEmpNd - payHaot;
+
+  main.innerHTML = `
+  <div class="hero">
+    <div style="display:flex;align-items:center;gap:16px;position:relative;z-index:1">
+      <img src="/logo.jpg" class="heroLogo" onerror="this.style.display='none'">
+      <div class="hero-text">
+        <h1>Нэгдсэн хяналтын самбар</h1>
+        <p class="sub">Дотоод ажил · Тайлан · Төлөвлөгөө</p>
+      </div>
+    </div>
+    <div class="hero-right"><div class="hero-badge">Систем онлайн</div></div>
+  </div>
+
+  <div class="wc-bar">
+    <div class="wc-section" id="wcWeather">
+      <div class="wc-label">🌡️ ЦАГ АГААР · ЧОЙБАЛСАН, ДОРНОД</div>
+      <div class="wc-main" style="color:var(--ink3)">Ачаалж байна...</div>
+    </div>
+    <div class="wc-divider"></div>
+    <div class="wc-section" id="wcGreg"></div>
+    <div class="wc-divider"></div>
+    <div class="wc-section" id="wcOrg" style="cursor:default"></div>
+  </div>
+
+  <!-- Миний сарын ирц -->
+  <div class="panel" style="margin-bottom:16px">
+    <div class="panel-head">
+      <div>
+        <h3>👤 Миний ${month}-р сарын ирц</h3>
+        <div class="subtitle">${state.me?.full_name || ''} · ${monthStart} — ${todayStr}</div>
+      </div>
+      <span style="font-size:12px;font-weight:800;color:${myCounts['А']>=workdaysSoFar*0.9?'#16a34a':myCounts['А']>=workdaysSoFar*0.7?'#d97706':'#dc2626'}">
+        ${myCounts['А']} / ${workdaysSoFar} өдөр
+      </span>
+    </div>
+    <div class="panel-body">
+      <!-- Сарын ирцийн хүснэгт -->
+      <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:3px;margin-bottom:10px">
+        ${['Да','Мя','Лх','Пү','Ба','Бя','Ня'].map(d=>`<div style="text-align:center;font-size:9px;font-weight:700;color:#94a3b8;padding:2px 0">${d}</div>`).join('')}
+        ${(() => {
+          const firstDow = new Date(year, month-1, 1).getDay();
+          const offset = firstDow === 0 ? 6 : firstDow - 1;
+          const cells = Array(offset).fill(`<div></div>`);
+          const CODE_COLOR = {А:'#16a34a',Т:'#dc2626',Ч:'#d97706',Ө:'#2563eb',Э:'#64748b',Х:'#ea580c','ИЦ':'#7c3aed'};
+          const CODE_BG    = {А:'#dcfce7',Т:'#fee2e2',Ч:'#fef9c3',Ө:'#dbeafe',Э:'#f1f5f9',Х:'#ffedd5','ИЦ':'#ede9fe'};
+          for (let d = 1; d <= daysInMonth; d++) {
+            const dow = new Date(year, month-1, d).getDay();
+            const isWeekend = dow === 0 || dow === 6;
+            const isFuture  = d > todayDay;
+            const code = myMonthDays[d];
+            let bg = isWeekend ? '#f8f0ff' : isFuture ? '#f8fafc' : '#fef2f2';
+            let color = isWeekend ? '#a855f7' : isFuture ? '#cbd5e1' : '#dc2626';
+            let label = isWeekend ? '—' : isFuture ? '' : '?';
+            if (code) { bg = CODE_BG[code]||'#f0fdf4'; color = CODE_COLOR[code]||'#16a34a'; label = code; }
+            const isToday = d === todayDay;
+            cells.push(`<div style="text-align:center;padding:4px 2px;border-radius:6px;background:${bg};${isToday?'outline:2px solid #2563eb;outline-offset:-2px;':''}">
+              <div style="font-size:9px;color:#94a3b8">${d}</div>
+              <div style="font-size:9px;font-weight:800;color:${color}">${label}</div>
+            </div>`);
+          }
+          return cells.join('');
+        })()}
+      </div>
+      <!-- Legend + тоо -->
+      <div style="display:flex;flex-wrap:wrap;gap:6px 12px;font-size:11px;border-top:1px solid #f1f5f9;padding-top:10px">
+        ${[
+          ['А','Ажилласан', '#dcfce7','#16a34a'],
+          ['Т','Тасалсан',  '#fee2e2','#dc2626'],
+          ['Ч','Чөлөө',     '#fef9c3','#d97706'],
+          ['Ө','Өвчтэй',    '#dbeafe','#2563eb'],
+          ['Э','Амралт',    '#f1f5f9','#64748b'],
+          ['Х','Хоцорсон',  '#ffedd5','#ea580c'],
+          ['ИЦ','Илүү цаг', '#ede9fe','#7c3aed'],
+        ].map(([code,lb,bg,col])=>`
+          <span style="display:flex;align-items:center;gap:4px">
+            <span style="width:16px;height:16px;border-radius:3px;background:${bg};border:1px solid ${col}44;display:inline-flex;align-items:center;justify-content:center;font-size:8px;font-weight:800;color:${col}">${code}</span>
+            <span style="color:#475569">${lb}</span>
+            <span style="font-weight:800;color:${col}">${myCounts[code]||0}</span>
+          </span>`).join('')}
+        <span style="display:flex;align-items:center;gap:4px">
+          <span style="width:16px;height:16px;border-radius:3px;background:#f8f0ff;border:1px solid #d8b4fe;display:inline-block"></span>
+          <span style="color:#475569">Амралтын өдөр</span>
+        </span>
+        <span style="display:flex;align-items:center;gap:4px">
+          <span style="width:16px;height:16px;border-radius:3px;background:#fef2f2;border:1px dashed #dc2626;display:inline-block"></span>
+          <span style="color:#475569">Бүртгэгдээгүй</span>
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin-bottom:16px">
+
+    <!-- Цалингийн тооцоо -->
+    ${myPay && paySal > 0 ? `
+    <div class="panel">
+      <div class="panel-head">
+        <div><h3>💰 ${month}-р сарын цалин</h3><div class="subtitle">Ирцийн хугацаа: ${fmtPrD(prStart)} — ${fmtPrD(prEnd)}</div></div>
+      </div>
+      <div class="panel-body" style="padding-top:4px">
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid #f1f5f9">
+          <span style="font-size:11px;color:#64748b"><span style="color:#1d4ed8;font-weight:700">+</span> Үндсэн цалин</span>
+          <span style="font-size:12px;font-weight:700;color:#1d4ed8">${paySal.toLocaleString()}₮</span>
+        </div>
+        ${paySkill > 0 ? `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid #f1f5f9">
+          <span style="font-size:11px;color:#64748b"><span style="color:#0f766e;font-weight:700">+</span> Ур чадварын нэмэгдэл <span style="color:#0f766e">(${paySkillRt}%)</span></span>
+          <span style="font-size:12px;font-weight:700;color:#0f766e">${Math.round(paySkill).toLocaleString()}₮</span>
+        </div>` : ''}
+        ${payTenure > 0 ? `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid #f1f5f9">
+          <span style="font-size:11px;color:#64748b"><span style="color:#4338ca;font-weight:700">+</span> Ажилласан жилийн нэмэгдэл <span style="color:#4338ca">(${payTenureYr} жил · ${payTenureRt}%)</span></span>
+          <span style="font-size:12px;font-weight:700;color:#4338ca">${Math.round(payTenure).toLocaleString()}₮</span>
+        </div>` : ''}
+        ${payMeal > 0 ? `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid #f1f5f9">
+          <span style="font-size:11px;color:#64748b"><span style="color:#b45309;font-weight:700">+</span> Хоолны нэмэгдэл <span style="color:#b45309">(${payWorkedDays} хоног × 10,000₮)</span></span>
+          <span style="font-size:12px;font-weight:700;color:#b45309">${payMeal.toLocaleString()}₮</span>
+        </div>` : ''}
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-top:2px solid #e2e8f0;border-bottom:1px solid #e2e8f0;margin:2px 0">
+          <span style="font-size:11px;font-weight:700;color:#334155">Нийт (НД суурь)</span>
+          <span style="font-size:13px;font-weight:800;color:#334155">${Math.round(payBase).toLocaleString()}₮</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid #fee2e2">
+          <span style="font-size:11px;color:#dc2626"><span style="font-weight:700">−</span> НД шимтгэл <span style="opacity:.8">(тэтгэвэр 8.5% + тэтгэмж 1% + эмнэлэг 2% = 11.5%)</span></span>
+          <span style="font-size:12px;font-weight:700;color:#dc2626">${payEmpNd.toLocaleString()}₮</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid #f1f5f9">
+          <span style="font-size:11px;color:#dc2626"><span style="font-weight:700">−</span> ХАОАТ <span style="opacity:.8">(10%)</span></span>
+          <span style="font-size:12px;font-weight:700;color:#dc2626">${payHaot.toLocaleString()}₮</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;background:#f0fdf4;border-radius:8px;padding:9px 12px;margin-top:8px">
+          <span style="font-size:12px;font-weight:800;color:#15803d">= Гарт авах дүн</span>
+          <span style="font-size:16px;font-weight:800;color:#15803d">${payNet.toLocaleString()}₮</span>
+        </div>
+      </div>
+    </div>` : ''}
+
+    <!-- Гэрэлтүүлгийн тойм -->
+    <div class="panel">
+      <div class="panel-head">
+        <div><h3>💡 Гэрэлтүүлгийн тойм</h3><div class="subtitle">Нийт бүртгэлтэй гэрлүүд</div></div>
+        <span class="pill" style="background:${lightBg};color:${lightCol};font-weight:800;font-size:11px">⚡ ${lightPct}% асалттай</span>
+      </div>
+      <div class="panel-body" style="padding-top:6px">
+        ${[
+          ['🛣️','Авто замын гэрэл', gerStats.sl_heads||0, gerStats.sl_broken||0, '#2563eb'],
+          ['🏘️','Гэр хорооллын гэрэл', gerStats.total_ger||0, gerStats.ger_broken||0, '#8b5cf6'],
+          ['🗼','Цамхаг / прожектор', gerStats.total_camhag||0, gerStats.camhag_broken||0, '#0891b2'],
+        ].map(([ic,lb,total,broken,c]) => {
+          const ok = total - broken;
+          const pct = total > 0 ? ((ok/total)*100).toFixed(0) : 100;
+          const cc = pct >= 90 ? '#16a34a' : pct >= 70 ? '#d97706' : '#dc2626';
+          return `
+          <div style="margin-bottom:12px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+              <span style="font-size:12px;font-weight:700;color:#344054">${ic} ${lb}</span>
+              <span style="font-size:11px;font-weight:800;color:${cc}">${ok.toLocaleString()} / ${total.toLocaleString()} · ${pct}%</span>
+            </div>
+            <div style="height:7px;background:#f1f5f9;border-radius:4px;overflow:hidden">
+              <div style="height:100%;width:${pct}%;background:${cc};border-radius:4px;transition:width .3s"></div>
+            </div>
+            ${broken > 0 ? `<div style="font-size:10px;color:#dc2626;margin-top:3px">⚠️ ${broken} гэмтэлтэй</div>` : `<div style="font-size:10px;color:#16a34a;margin-top:3px">✅ Хэвийн</div>`}
+          </div>`;
+        }).join('')}
+      </div>
+    </div>
+
+    <!-- Камерын тойм -->
+    <div class="panel">
+      ${(() => {
+        const total  = workerCameraStats.cameras || 0;
+        const broken = workerCameraStats.broken_cameras || 0;
+        const ok     = Math.max(0, total - broken);
+        const pct    = total > 0 ? (ok / total * 100).toFixed(1) : '100.0';
+        const col    = pct >= 90 ? '#16a34a' : pct >= 70 ? '#d97706' : '#dc2626';
+        const bg     = pct >= 90 ? '#f0fdf4' : pct >= 70 ? '#fff7ed' : '#fef2f2';
+        return `
+        <div class="panel-head">
+          <div><h3>📷 Камерын тойм</h3><div class="subtitle">Хяналтын камерын байдал</div></div>
+          <span class="pill" style="background:${bg};color:${col};font-weight:800;font-size:11px">📷 ${pct}% асалттай</span>
+        </div>
+        <div class="panel-body" style="padding-top:6px">
+          <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:12px">
+            ${[
+              [workerCameraStats.points || 0, 'Байршил',         '#2563eb', '#eff6ff'],
+              [total,                          'Нийт камер',      '#0ea5e9', '#f0f9ff'],
+              [ok,                             'Ажиллаж байна',  '#16a34a', '#f0fdf4'],
+              [broken,                         'Гэмтэлтэй',      '#dc2626', '#fef2f2'],
+            ].map(([v, lb, c, bg2]) => `
+              <div style="background:${bg2};border-radius:8px;padding:8px;text-align:center">
+                <div style="font-size:18px;font-weight:800;color:${c};line-height:1.2">${Number(v).toLocaleString()}</div>
+                <div style="font-size:9px;color:#64748b;margin-top:2px">${lb}</div>
+              </div>`).join('')}
+          </div>
+          <div style="margin-bottom:4px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+              <span style="font-size:12px;font-weight:700;color:#344054">📷 Нийт камер</span>
+              <span style="font-size:11px;font-weight:800;color:${col}">${ok.toLocaleString()} / ${total.toLocaleString()} · ${Number(pct).toFixed(0)}%</span>
+            </div>
+            <div style="height:7px;background:#f1f5f9;border-radius:4px;overflow:hidden">
+              <div style="height:100%;width:${Math.min(100, Number(pct))}%;background:${col};border-radius:4px;transition:width .3s"></div>
+            </div>
+            ${broken > 0
+              ? `<div style="font-size:10px;color:#dc2626;margin-top:3px">⚠️ ${broken} камер гэмтэлтэй</div>`
+              : `<div style="font-size:10px;color:#16a34a;margin-top:3px">✅ Бүх камер хэвийн ажиллаж байна</div>`}
+          </div>
+        </div>`;
+      })()}
+    </div>
+
+  </div>
+
+  <!-- Миний даалгаврууд -->
+  <div class="panel" style="margin-bottom:16px">
+    <div class="panel-head">
+      <div><h3>📋 Миний даалгаврууд</h3><div class="subtitle">Хуваарилагдсан, дуусаагүй ажлууд</div></div>
+      <span class="pill">${myTasks.length} ажил</span>
+    </div>
+    <div class="panel-body" style="padding-top:4px">
+      ${myTasks.length ? myTasks.map(t => {
+        const prog = Number(t.progress || 0);
+        const sc = t.status === 'Явцтай' ? '#2563eb' : t.status === 'Хойшлогдсон' ? '#d97706' : '#64748b';
+        const sb = t.status === 'Явцтай' ? '#dbeafe' : t.status === 'Хойшлогдсон' ? '#fef9c3' : '#f1f5f9';
+        return `<div style="padding:9px 0;border-bottom:1px solid #f1f5f9">
+          <div style="display:flex;align-items:flex-start;gap:10px">
+            <div style="flex:1;min-width:0">
+              <div style="font-size:12px;font-weight:700;color:#1e293b">${escapeHtml(t.title||'')}</div>
+              <div style="font-size:10px;color:#64748b;margin-top:2px">${[t.work_title,t.location].filter(Boolean).map(escapeHtml).join(' · ')}${t.end_date ? ' · Дуусах: '+t.end_date.slice(0,10) : ''}</div>
+              <div style="height:4px;background:#f1f5f9;border-radius:2px;margin-top:6px;overflow:hidden"><div style="height:100%;width:${prog}%;background:${sc};border-radius:2px"></div></div>
+            </div>
+            <div style="text-align:right;flex-shrink:0">
+              <span style="font-size:10px;font-weight:700;background:${sb};color:${sc};padding:2px 8px;border-radius:10px">${escapeHtml(t.status||'')}</span>
+              <div style="font-size:10px;color:#94a3b8;margin-top:3px">${prog}%</div>
+            </div>
+          </div>
+        </div>`;
+      }).join('') : '<div style="font-size:12px;color:#94a3b8;padding:12px 0">Одоогоор даалгавар байхгүй байна</div>'}
+    </div>
+  </div>
+
+  <!-- Энэ сарын ажлууд -->
+  <div class="panel" style="margin-bottom:16px">
+    <div class="panel-head">
+      <div><h3>🔧 ${month}-р сарын ажлууд</h3><div class="subtitle">Тухайн сард бүртгэгдсэн ажлын мэдээлэл</div></div>
+      <span class="pill">${thisMonthLogs.length} бүртгэл</span>
+    </div>
+    <div class="panel-body" style="padding-top:4px">
+      ${thisMonthLogs.length ? thisMonthLogs.map(w => {
+        const sc = ['Хаагдсан','Дууссан'].includes(w.status) ? '#16a34a' : w.status === 'Явцтай' ? '#2563eb' : '#64748b';
+        const sb = ['Хаагдсан','Дууссан'].includes(w.status) ? '#dcfce7' : w.status === 'Явцтай' ? '#dbeafe' : '#f1f5f9';
+        return `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #f1f5f9">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:12px;font-weight:700;color:#1e293b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(w.title||'')}</div>
+            <div style="font-size:10px;color:#64748b;margin-top:2px">${[w.category,w.location,w.work_date?.slice(0,10)].filter(Boolean).map(v=>escapeHtml(String(v))).join(' · ')}</div>
+          </div>
+          <span style="font-size:10px;font-weight:700;background:${sb};color:${sc};padding:2px 8px;border-radius:10px;white-space:nowrap">${escapeHtml(w.status||'')}</span>
+        </div>`;
+      }).join('') : '<div style="font-size:12px;color:#94a3b8;padding:12px 0">Энэ сард бүртгэл байхгүй байна</div>'}
+    </div>
+  </div>
+`;
+
+  updateWcBar();
+  renderOrgInfo();
+  fetchWeather().then(renderWeather);
+}
+
 export async function dashboard() {
-  const s = await api(`/api/reports/summary?year=${new Date().getFullYear()}`);
+  if (state.me?.role === 'worker') return workerDashboard();
+
+  const _emptySummary = { work: { count:0, total_cost:0, avg_progress:0 }, expenses: { count:0, total:0 }, materials: [], byCategory: [], hr: [], docs: [], safety: [] };
+  const s = await api(`/api/reports/summary?year=${new Date().getFullYear()}&month=${new Date().getMonth()+1}`).catch(() => _emptySummary);
   let myTasks = [];
   try { myTasks = await api("/api/my-tasks"); } catch(e) {}
   let myRisks = [];
@@ -265,8 +681,16 @@ export async function dashboard() {
   try { expiringDocs = (await api("/api/documents/expiring?days=30")) || []; } catch(e) {}
   let upcomingReports = [];
   try { upcomingReports = (await api("/api/report-schedules/upcoming")) || []; } catch(e) {}
+  let dueLetters = [];
+  try { dueLetters = ((await api("/api/admin-hub/dashboard"))?.dueDocs) || []; } catch(e) {}
   let gerStats = { total_ger: 0, total_camhag: 0, total_broken: 0, sl_poles: 0, sl_heads: 0 };
   try { gerStats = await api("/api/sl-ger-stats"); } catch(e) {}
+  let cameraStats = { points: 0, cameras: 0, broken_cameras: 0 };
+  try {
+    const r = await api("/api/camera-analytics");
+    const s = r.summary || {};
+    cameraStats = { points: s.points || 0, cameras: s.capacity || 0, broken_cameras: s.broken_cameras || 0 };
+  } catch(e) {}
   let lightSchedules = [];
   try { lightSchedules = await api(`/api/light-schedules?year=${new Date().getFullYear()}`); } catch(e) {}
   const workCost      = Math.round(s.work.total_cost || 0);
@@ -308,6 +732,69 @@ export async function dashboard() {
   // ── This month attendance trend (last 7 days) ──
   const year  = new Date().getFullYear();
   const month = new Date().getMonth() + 1;
+
+  // ── My salary ──
+  let myPay = null;
+  try { myPay = await api("/api/my-salary"); } catch(e) {}
+  const prStart = month === 1 ? new Date(year-1, 11, 21) : new Date(year, month-2, 21);
+  const prEnd   = new Date(year, month-1, 20);
+  const fmtPrD  = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  let payWorkedDays = 0;
+  if (myPay) {
+    const prDayMap = new Map();
+    hrRows.filter(r => r.user_id === state.me?.id && r.start_date).forEach(r => {
+      const rs = new Date(r.start_date.slice(0,10));
+      const re = new Date((r.end_date || r.start_date).slice(0,10));
+      const cs = rs > prStart ? rs : prStart;
+      const ce = re < prEnd   ? re : prEnd;
+      if (cs > ce) return;
+      for (let d = new Date(cs); d <= ce; d.setDate(d.getDate()+1)) {
+        const key = fmtPrD(d);
+        const prev = prDayMap.get(key);
+        if (!prev || r.id > prev.id) prDayMap.set(key, r);
+      }
+    });
+    payWorkedDays = [...prDayMap.values()].filter(r => ["Ажилласан","Хоцорсон","Илүү цаг"].includes(r.record_type)).length;
+  }
+  const tenureRateFn = y => { const v = Math.floor(Number(y||0)); return v>=16?25:v>=11?20:v>=9?15:v>=7?10:v>=4?8:v>=2?5:0; };
+  const paySal       = Number(myPay?.salary || 0);
+  const paySkillRt   = Math.min(25, Math.max(0, Math.floor(Number(myPay?.skill_allowance_rate||0))));
+  const paySkill     = paySal * paySkillRt / 100;
+  const payTenureYr  = Math.floor(Number(myPay?.tenure_years || 0));
+  const payTenureRt  = tenureRateFn(payTenureYr);
+  const payTenure    = paySal * payTenureRt / 100;
+  const payMeal      = payWorkedDays * 10000;
+  const payBase      = paySal + paySkill + payTenure + payMeal;
+  const payEmpNd     = Math.round(payBase * 0.115);
+  const payHaot      = Math.round((payBase - payEmpNd) * 0.10);
+  const payNet       = Math.round(payBase) - payEmpNd - payHaot;
+
+  // ── My monthly attendance ──
+  const myId       = state.me?.id;
+  const daysInMon  = new Date(year, month, 0).getDate();
+  const monthStart = `${year}-${String(month).padStart(2,'0')}-01`;
+  const monthEnd   = `${year}-${String(month).padStart(2,'0')}-${String(daysInMon).padStart(2,'0')}`;
+  const todayDay   = new Date().getDate();
+  const myMonthDays = {};
+  const myLatestByDay = {};
+  hrRows.filter(r => r.user_id === myId && r.start_date).forEach(r => {
+    const rs = r.start_date.slice(0,10);
+    const re = (r.end_date || r.start_date).slice(0,10);
+    const clampS = rs < monthStart ? monthStart : rs;
+    const clampE = re > monthEnd   ? monthEnd   : re;
+    if (clampS > clampE) return;
+    for (let d = new Date(clampS); d <= new Date(clampE); d.setDate(d.getDate()+1)) {
+      const dk = d.getDate();
+      if (!myLatestByDay[dk] || r.id > myLatestByDay[dk].id) myLatestByDay[dk] = r;
+    }
+  });
+  const ATT_CODE = {"Ажилласан":"А","Ажил тасалсан":"Т","Чөлөө":"Ч","Өвчтэй":"Ө","Ээлжийн амралт":"Э","Хоцорсон":"Х","Илүү цаг":"ИЦ"};
+  Object.entries(myLatestByDay).forEach(([dk,r]) => { myMonthDays[dk] = ATT_CODE[r.record_type] || "А"; });
+  const myCounts = {А:0,Т:0,Ч:0,Ө:0,Э:0,Х:0,ИЦ:0};
+  Object.values(myMonthDays).forEach(c => { if (myCounts[c] !== undefined) myCounts[c]++; });
+  const workdaysSoFar = Array.from({length: todayDay}, (_,i) => {
+    const d = new Date(year, month-1, i+1); return d.getDay()!==0 && d.getDay()!==6;
+  }).filter(Boolean).length;
 
   main.innerHTML = `
   <!-- ═══ HERO ═══ -->
@@ -383,59 +870,112 @@ export async function dashboard() {
         </div>
       </div>
     </div>
-    <div class="stat-card ${(matWarnings.length||expiringDocs.length||upcomingReports.length)?'red':'green'}">
+    <div class="stat-card ${(matWarnings.length||expiringDocs.length||upcomingReports.length||dueLetters.length)?'red':'green'}">
       <div class="stat-top">
         <span class="stat-label">Анхааруулга</span>
-        <div class="stat-icon">${(matWarnings.length||expiringDocs.length)?'⚠️':'✅'}</div>
+        <div class="stat-icon">${(matWarnings.length||expiringDocs.length||dueLetters.length)?'⚠️':'✅'}</div>
       </div>
-      <div class="stat-value">${matWarnings.length + expiringDocs.length + upcomingReports.length}</div>
-      <div class="stat-sub">${[matWarnings.length?'Материал':'', expiringDocs.length?'Баримт':'', upcomingReports.length?'Тайлан':''].filter(Boolean).join(' · ')||'Хэвийн байдалтай'}</div>
+      <div class="stat-value">${matWarnings.length + expiringDocs.length + upcomingReports.length + dueLetters.length}</div>
+      <div class="stat-sub">${[matWarnings.length?'Материал':'', expiringDocs.length?'Баримт':'', upcomingReports.length?'Тайлан':'', dueLetters.length?'Албан бичиг':''].filter(Boolean).join(' · ')||'Хэвийн байдалтай'}</div>
     </div>
   </div>
 
-  <!-- ═══ AI ДҮГНЭЛТ ═══ -->
-  ${(() => {
-    if (!aiSummary) return '';
-    const badge = (icon, label, val, isAlert) => {
-      const danger = isAlert && typeof val === 'number' && val > 0;
-      const bg = danger ? 'rgba(239,68,68,.18)' : 'rgba(255,255,255,.08)';
-      const nc = danger ? '#fca5a5' : '#94a3b8';
-      const vc = danger ? '#f87171' : '#f8fafc';
-      return `<div style="background:${bg};border-radius:10px;padding:7px 11px;text-align:center;min-width:74px;cursor:default">
-        <div style="font-size:15px">${icon}</div>
-        <div style="font-size:16px;font-weight:800;color:${vc};line-height:1.2">${val ?? '—'}</div>
-        <div style="font-size:9px;color:${nc};margin-top:2px;white-space:nowrap">${label}</div>
-      </div>`;
-    };
-    const chips = ['Өнөөдрийн тойм','Нээлттэй гэмтэл хэдэн байна?','Агуулахын нөөц байна уу?','Өнөөдөр хэн ирсэн?'];
-    return `
-    <div style="background:linear-gradient(135deg,#0f172a 0%,#1e3a5f 100%);border-radius:14px;padding:14px 18px;margin-bottom:16px">
-      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:12px">
-        <div>
-          <div style="font-size:13px;font-weight:800;color:#fff">💬 AI Өдрийн тойм &nbsp;<span style="font-weight:400;font-size:11px;color:#64748b">· ${aiSummary.today}</span></div>
-          <div style="font-size:11px;color:#475569;margin-top:2px">Системийн өнөөдрийн байдал — асуулт дарж илгээх</div>
-        </div>
-        <button onclick="toggleErpAssistant(true)" style="border:1px solid rgba(255,255,255,.2);background:rgba(255,255,255,.1);color:#e2e8f0;border-radius:8px;padding:5px 14px;cursor:pointer;font-size:11px;font-weight:700">ERP туслахтай ярих →</button>
+  <!-- ═══ МОЙ ЦАЛИН ═══ -->
+  ${myPay && paySal > 0 && state.me?.role !== 'director' ? `
+  <div class="panel" style="margin-bottom:16px">
+    <div class="panel-head">
+      <div><h3>💰 Миний ${month}-р сарын цалин</h3><div class="subtitle">Ирцийн хугацаа: ${fmtPrD(prStart)} — ${fmtPrD(prEnd)}</div></div>
+    </div>
+    <div class="panel-body" style="padding-top:4px">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #f1f5f9">
+        <span style="font-size:12px;color:#64748b"><span style="color:#1d4ed8;font-weight:700">+</span> Үндсэн цалин</span>
+        <span style="font-size:13px;font-weight:700;color:#1d4ed8">${paySal.toLocaleString()}₮</span>
       </div>
-      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px">
-        ${badge('⚡','Гэрлэн гэмтэл', aiSummary.open_light_faults, true)}
-        ${badge('🔧','Толгой гэмтэл', aiSummary.broken_heads, true)}
-        ${badge('🛠','Нээлттэй ажил', aiSummary.open_work, true)}
-        ${badge('🚦','Дохионы гэмтэл', aiSummary.traffic_issues, true)}
-        ${badge('✅','Өнөөдөр ирсэн', aiSummary.present_today, false)}
-        ${badge('📦','Нөөц анхааруулга', aiSummary.low_stock_items, true)}
+      ${paySkill > 0 ? `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #f1f5f9">
+        <span style="font-size:12px;color:#64748b"><span style="color:#0f766e;font-weight:700">+</span> Ур чадварын нэмэгдэл <span style="color:#0f766e">(${paySkillRt}%)</span></span>
+        <span style="font-size:13px;font-weight:700;color:#0f766e">${Math.round(paySkill).toLocaleString()}₮</span>
+      </div>` : ''}
+      ${payTenure > 0 ? `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #f1f5f9">
+        <span style="font-size:12px;color:#64748b"><span style="color:#4338ca;font-weight:700">+</span> Ажилласан жилийн нэмэгдэл <span style="color:#4338ca">(${payTenureYr} жил · ${payTenureRt}%)</span></span>
+        <span style="font-size:13px;font-weight:700;color:#4338ca">${Math.round(payTenure).toLocaleString()}₮</span>
+      </div>` : ''}
+      ${payMeal > 0 ? `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #f1f5f9">
+        <span style="font-size:12px;color:#64748b"><span style="color:#b45309;font-weight:700">+</span> Хоолны нэмэгдэл <span style="color:#b45309">(${payWorkedDays} хоног × 10,000₮)</span></span>
+        <span style="font-size:13px;font-weight:700;color:#b45309">${payMeal.toLocaleString()}₮</span>
+      </div>` : ''}
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-top:2px solid #e2e8f0;border-bottom:1px solid #e2e8f0;margin:2px 0">
+        <span style="font-size:12px;font-weight:700;color:#334155">Нийт (НД суурь)</span>
+        <span style="font-size:14px;font-weight:800;color:#334155">${Math.round(payBase).toLocaleString()}₮</span>
       </div>
-      <div style="display:flex;flex-wrap:wrap;gap:6px">
-        ${chips.map(q=>`<button onclick="toggleErpAssistant(true);askErpAssistant('${q.replace(/'/g,"\\'")}');" style="border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.07);color:#cbd5e1;border-radius:20px;padding:4px 12px;font-size:11px;cursor:pointer;transition:background .12s" onmouseover="this.style.background='rgba(255,255,255,.14)'" onmouseout="this.style.background='rgba(255,255,255,.07)'">${q}</button>`).join('')}
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #fee2e2">
+        <span style="font-size:12px;color:#dc2626"><span style="font-weight:700">−</span> НД шимтгэл <span style="opacity:.8">(тэтгэвэр 8.5% + тэтгэмж 1% + эмнэлэг 2% = 11.5%)</span></span>
+        <span style="font-size:13px;font-weight:700;color:#dc2626">${payEmpNd.toLocaleString()}₮</span>
       </div>
-    </div>`;
-  })()}
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #f1f5f9">
+        <span style="font-size:12px;color:#dc2626"><span style="font-weight:700">−</span> ХАОАТ <span style="opacity:.8">(10%)</span></span>
+        <span style="font-size:13px;font-weight:700;color:#dc2626">${payHaot.toLocaleString()}₮</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;background:#f0fdf4;border-radius:8px;padding:10px 12px;margin-top:8px">
+        <span style="font-size:13px;font-weight:800;color:#15803d">= Гарт авах дүн</span>
+        <span style="font-size:17px;font-weight:800;color:#15803d">${payNet.toLocaleString()}₮</span>
+      </div>
+    </div>
+  </div>` : ''}
 
-  ${renderAiFeedbackStats(aiFeedbackStats)}
-  ${renderDevRequestStats(devRequests)}
+  ${state.me?.role !== 'director' ? `<!-- ═══ МОЙ ИРЭЦ ═══ -->
+  <div class="panel" style="margin-bottom:16px">
+    <div class="panel-head">
+      <div>
+        <h3>👤 Миний ${month}-р сарын ирц</h3>
+        <div class="subtitle">${state.me?.full_name || ''} · ${monthStart} — ${todayStr}</div>
+      </div>
+      <span style="font-size:12px;font-weight:800;color:${myCounts['А']>=workdaysSoFar*0.9?'#16a34a':myCounts['А']>=workdaysSoFar*0.7?'#d97706':'#dc2626'}">
+        ${myCounts['А']} / ${workdaysSoFar} өдөр
+      </span>
+    </div>
+    <div class="panel-body">
+      <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:3px;margin-bottom:10px">
+        ${['Да','Мя','Лх','Пү','Ба','Бя','Ня'].map(d=>`<div style="text-align:center;font-size:9px;font-weight:700;color:#94a3b8;padding:2px 0">${d}</div>`).join('')}
+        ${(() => {
+          const firstDow = new Date(year, month-1, 1).getDay();
+          const offset = firstDow === 0 ? 6 : firstDow - 1;
+          const cells = Array(offset).fill('<div></div>');
+          const CODE_COLOR = {А:'#16a34a',Т:'#dc2626',Ч:'#d97706',Ө:'#2563eb',Э:'#64748b',Х:'#ea580c','ИЦ':'#7c3aed'};
+          const CODE_BG    = {А:'#dcfce7',Т:'#fee2e2',Ч:'#fef9c3',Ө:'#dbeafe',Э:'#f1f5f9',Х:'#ffedd5','ИЦ':'#ede9fe'};
+          for (let d = 1; d <= daysInMon; d++) {
+            const dow = new Date(year, month-1, d).getDay();
+            const isWeekend = dow===0||dow===6;
+            const isFuture  = d > todayDay;
+            const code = myMonthDays[d];
+            let bg = isWeekend?'#f8f0ff':isFuture?'#f8fafc':'#fef2f2';
+            let color = isWeekend?'#a855f7':isFuture?'#cbd5e1':'#dc2626';
+            let label = isWeekend?'—':isFuture?'':'?';
+            if (code) { bg=CODE_BG[code]||'#f0fdf4'; color=CODE_COLOR[code]||'#16a34a'; label=code; }
+            cells.push(`<div style="text-align:center;padding:4px 2px;border-radius:6px;background:${bg};${d===todayDay?'outline:2px solid #2563eb;outline-offset:-2px;':''}">
+              <div style="font-size:9px;color:#94a3b8">${d}</div>
+              <div style="font-size:9px;font-weight:800;color:${color}">${label}</div>
+            </div>`);
+          }
+          return cells.join('');
+        })()}
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px 12px;font-size:11px;border-top:1px solid #f1f5f9;padding-top:10px">
+        ${[['А','Ажилласан','#dcfce7','#16a34a'],['Т','Тасалсан','#fee2e2','#dc2626'],['Ч','Чөлөө','#fef9c3','#d97706'],
+           ['Ө','Өвчтэй','#dbeafe','#2563eb'],['Э','Амралт','#f1f5f9','#64748b'],['Х','Хоцорсон','#ffedd5','#ea580c'],
+           ['ИЦ','Илүү цаг','#ede9fe','#7c3aed']].map(([code,lb,bg,col])=>`
+          <span style="display:flex;align-items:center;gap:4px">
+            <span style="width:16px;height:16px;border-radius:3px;background:${bg};border:1px solid ${col}44;display:inline-flex;align-items:center;justify-content:center;font-size:8px;font-weight:800;color:${col}">${code}</span>
+            <span style="color:#475569">${lb}</span>
+            <span style="font-weight:800;color:${col}">${myCounts[code]||0}</span>
+          </span>`).join('')}
+      </div>
+    </div>
+  </div>` : ''}
+
+  <!-- AI and ERP feedback sections are shown below the operational panels. -->
 
   <!-- ═══ MAIN CONTENT GRID ═══ -->
-  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:16px">
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin-bottom:16px">
 
     <!-- Өнөөдрийн ирц -->
     <div class="panel">
@@ -447,7 +987,7 @@ export async function dashboard() {
         <button class="btn sm secondary" onclick="show('attendance')">Бүртгэх →</button>
       </div>
       <div class="panel-body">
-        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin-bottom:12px">
           ${[
             ['🟡','Чөлөөтэй', todayAtt.leave,    'amber'],
             ['🔵','Өвчтэй',   todayAtt.sick,     'blue'],
@@ -625,6 +1165,59 @@ export async function dashboard() {
       </div>
     </div>
 
+    <!-- Камерын тойм -->
+    <div class="panel">
+      <div class="panel-head">
+        <div>
+          <h3>📷 Камерын тойм</h3>
+          <div class="subtitle">Хяналтын камерын байдал</div>
+        </div>
+        ${(() => {
+          const total  = cameraStats.cameras || 0;
+          const broken = cameraStats.broken_cameras || 0;
+          const ok  = Math.max(0, total - broken);
+          const pct = total > 0 ? (ok / total * 100).toFixed(1) : '100.0';
+          const col = pct >= 90 ? 'ok' : pct >= 70 ? 'warn' : 'bad';
+          return `<span class="pill ${col}" style="font-size:11px;font-weight:800">📷 ${pct}% асалттай</span>`;
+        })()}
+      </div>
+      <div class="panel-body" style="padding-top:6px">
+        <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:6px;margin-bottom:12px">
+          ${[
+            [cameraStats.points   || 0, 'Байршил',        '#2563eb', '#eff6ff'],
+            [cameraStats.cameras  || 0, 'Нийт камер',     '#0ea5e9', '#f0f9ff'],
+            [Math.max(0, (cameraStats.cameras||0) - (cameraStats.broken_cameras||0)), 'Ажиллаж байна', '#16a34a', '#f0fdf4'],
+            [cameraStats.broken_cameras || 0, 'Гэмтэлтэй', '#dc2626', '#fef2f2'],
+          ].map(([val, label, color, bg]) => `
+            <div style="background:${bg};border-radius:8px;padding:8px;text-align:center">
+              <div style="font-size:18px;font-weight:800;color:${color};line-height:1.2">${Number(val).toLocaleString()}</div>
+              <div style="font-size:9px;color:#64748b;margin-top:2px">${label}</div>
+            </div>`).join('')}
+        </div>
+        ${(() => {
+          const total  = cameraStats.cameras || 0;
+          const broken = cameraStats.broken_cameras || 0;
+          const ok  = Math.max(0, total - broken);
+          const pct = total > 0 ? ok / total * 100 : 100;
+          const col = pct >= 90 ? '#16a34a' : pct >= 70 ? '#d97706' : '#dc2626';
+          return `
+          <div style="margin-bottom:10px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+              <span style="font-size:12px;font-weight:700;color:#344054">📷 Бүх камер</span>
+              <span style="font-size:11px;font-weight:800;color:${col}">${ok.toLocaleString()} / ${total.toLocaleString()} · ${pct.toFixed(0)}%</span>
+            </div>
+            <div style="height:7px;background:#f1f5f9;border-radius:4px;overflow:hidden">
+              <div style="height:100%;width:${Math.min(100, pct)}%;background:${col};border-radius:4px;transition:width .3s"></div>
+            </div>
+            ${broken > 0
+              ? `<div style="font-size:10px;color:#dc2626;margin-top:3px">⚠️ ${broken} камер гэмтэлтэй</div>`
+              : `<div style="font-size:10px;color:#16a34a;margin-top:3px">✅ Бүх камер хэвийн ажиллаж байна</div>`}
+          </div>`;
+        })()}
+        <button class="btn sm secondary" onclick="show('cameras')" style="width:100%;font-size:12px;padding:6px">Камерын дэлгэрэнгүй →</button>
+      </div>
+    </div>
+
     <!-- Warning Center -->
     <div class="panel">
       <div class="panel-head">
@@ -632,8 +1225,8 @@ export async function dashboard() {
           <h3>⚠️ Warning Center</h3>
           <div class="subtitle">Анхааруулга, мэдэгдэл</div>
         </div>
-        ${(matWarnings.length||expiringDocs.length||upcomingReports.length||lightWarnings.length)
-          ? `<span class="pill bad">${matWarnings.length+expiringDocs.length+upcomingReports.length+lightWarnings.length} анхааруулга</span>`
+        ${(matWarnings.length||expiringDocs.length||upcomingReports.length||lightWarnings.length||dueLetters.length)
+          ? `<span class="pill bad">${matWarnings.length+expiringDocs.length+upcomingReports.length+lightWarnings.length+dueLetters.length} анхааруулга</span>`
           : `<span class="pill ok">Хэвийн</span>`}
       </div>
       <div class="panel-body" style="padding-top:12px">
@@ -644,6 +1237,17 @@ export async function dashboard() {
               <span style="color:var(--ink3)">Асах: ${escapeHtml(w.onTime)} · Асаах тохиромжтой: ${escapeHtml(w.suitableOn)} · зөвшөөрөх зөрүү ±10мин</span>
             </div>
           </div>`).join('') : ''}
+        ${dueLetters.length ? dueLetters.map(d => {
+            const dl = Number(d.days_left ?? 0);
+            const cls = dl <= 0 ? 'bad' : 'warn';
+            const label = dl < 0 ? `${Math.abs(dl)} хоног хэтэрсэн!` : dl === 0 ? 'Өнөөдөр!' : `${dl} хоног үлдсэн`;
+            return `<div class="alertItem ${cls}" style="padding:9px 12px;font-size:12px;margin-top:6px;cursor:pointer" onclick="show('letters')">
+              <span>📨</span>
+              <div><b>${escapeHtml(d.subject || 'Албан бичиг')}</b> ${d.doc_no ? `<span style="color:var(--ink3);font-size:10px">(${escapeHtml(d.doc_no)})</span>` : ''}<br>
+                <span style="color:var(--ink3)">${label} · ${escapeHtml(d.due_date || '')}${d.source_org ? ' · '+escapeHtml(d.source_org) : ''}</span>
+              </div>
+            </div>`;
+          }).join('') : ''}
         ${expiringDocs.length ? expiringDocs.map(d => {
             const dl = Number(d.days_left);
             const cls = dl <= 7 ? 'bad' : 'warn';
@@ -700,7 +1304,7 @@ export async function dashboard() {
         <button class="btn sm secondary" onclick="show('reports')">Дэлгэрэнгүй →</button>
       </div>
       <div class="panel-body">
-        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px;margin-bottom:16px">
           <div style="background:var(--blue4);border-radius:10px;padding:14px;border:1px solid #bfdbfe">
             <div style="font-size:11px;color:var(--blue);margin-bottom:4px;font-weight:600">АЖЛЫН ЗАРДАЛ</div>
             <div style="font-size:22px;font-weight:800;color:var(--blue)">${workCost.toLocaleString()}₮</div>
@@ -762,6 +1366,10 @@ export async function dashboard() {
     </div>
 
   </div>
+
+  ${renderAiSummary(aiSummary)}
+  ${renderAiFeedbackStats(aiFeedbackStats)}
+  ${renderDevRequestStats(devRequests)}
 
   ${myTasks.length > 0 ? `
   <!-- ═══ МИНИЙ ДААЛГАВАР ═══ -->
@@ -933,7 +1541,7 @@ function openOrgEdit() {
             <div style="font-size:11px;font-weight:600;color:#64748b;margin-bottom:4px">ХАЯГ</div>
             <input class="input" id="oe_addr" value="${info.address||""}" placeholder="Чойбалсан хот, Дорнод аймаг">
           </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px">
             <div>
               <div style="font-size:11px;font-weight:600;color:#64748b;margin-bottom:4px">УТАС</div>
               <input class="input" id="oe_phone" value="${info.phone||""}" placeholder="+976 ...">

@@ -12,6 +12,7 @@ const TABS = [
   { key:"leave",      icon:"🗓", label:"Чөлөө" },
   { key:"archive",    icon:"🗄", label:"Архив" },
   { key:"reports",    icon:"📊", label:"Тайлан" },
+  { key:"aitest",     icon:"🤖", label:"AI Тест", directorOnly: true },
 ];
 let _activeTab = "home";
 
@@ -29,7 +30,7 @@ async function admin_hub() {
     </div>
 
     <div style="display:flex;gap:4px;border-bottom:2px solid #e2e6ed;margin-bottom:20px;overflow-x:auto">
-      ${TABS.map(t => `
+      ${TABS.filter(t => !t.directorOnly || state.me?.role === "director").map(t => `
         <button id="ahb_tab_${t.key}" onclick="ahbTab('${t.key}')"
           style="padding:8px 16px;border:none;border-radius:8px 8px 0 0;cursor:pointer;font-size:13px;font-weight:600;white-space:nowrap;
                  background:${_activeTab===t.key?'#2563eb':'transparent'};
@@ -52,13 +53,13 @@ async function admin_hub() {
     });
     const fns = { home:ahbHome, employees:ahbEmployees, letters:ahbLetters,
                   orders:ahbOrders, contracts:ahbContracts, leave:ahbLeave,
-                  archive:ahbArchive, workcats:ahbWorkCats, reports:ahbReports };
+                  archive:ahbArchive, workcats:ahbWorkCats, reports:ahbReports, aitest:ahbAiTest };
     if (fns[tab]) fns[tab]();
   };
 
   const fns = { home:ahbHome, employees:ahbEmployees, letters:ahbLetters,
                 orders:ahbOrders, contracts:ahbContracts, leave:ahbLeave,
-                archive:ahbArchive, workcats:ahbWorkCats, reports:ahbReports };
+                archive:ahbArchive, workcats:ahbWorkCats, reports:ahbReports, aitest:ahbAiTest };
   if (fns[_activeTab]) fns[_activeTab]();
 }
 
@@ -1297,9 +1298,207 @@ async function ahbWorkCats() {
   };
 }
 
+// ── AI Тест ───────────────────────────────────────────────────
+async function ahbAiTest() {
+  ahbSet(`
+    <div style="max-width:860px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:12px">
+        <div>
+          <h2 style="margin:0 0 4px;font-size:18px">🤖 AI Автомат тест</h2>
+          <div style="font-size:12px;color:#667085">ERP-ийн API, аюулгүй байдал, өгөгдлийн бүрэн бүтэн байдлыг автоматаар шалгана</div>
+        </div>
+        <button id="btnRunAiTest" onclick="runAiTest()"
+          style="background:#2563eb;color:#fff;border:0;border-radius:10px;padding:10px 22px;font-size:14px;font-weight:800;cursor:pointer;display:flex;align-items:center;gap:8px">
+          ▶ Тест ажиллуулах
+        </button>
+      </div>
+
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px" id="aiTestStats">
+        ${["Нийт тест","Амжилттай","Алдаатай","Оноо"].map(l =>
+          `<div style="background:#f8fafc;border:1px solid #e2e6ed;border-radius:12px;padding:16px;text-align:center">
+            <div style="font-size:22px;font-weight:900;color:#94a3b8">—</div>
+            <div style="font-size:11px;color:#94a3b8;margin-top:4px">${l}</div>
+          </div>`).join("")}
+      </div>
+
+      <div id="aiTestAI" style="display:none;margin-bottom:20px;background:#0f172a;border-radius:12px;padding:20px;color:#e2e8f0;font-size:13px;line-height:1.7;white-space:pre-wrap"></div>
+
+      <div id="aiTestResults" style="display:flex;flex-direction:column;gap:8px"></div>
+    </div>`);
+
+  window.runAiTest = async () => {
+    const btn = document.getElementById("btnRunAiTest");
+    if (btn) { btn.disabled = true; btn.innerHTML = "⏳ Шалгаж байна..."; }
+    document.getElementById("aiTestResults").innerHTML = `
+      <div style="text-align:center;padding:40px;color:#94a3b8">
+        <div style="font-size:32px;margin-bottom:12px">🔍</div>
+        <div style="font-size:14px;font-weight:600">API endpoint-уудыг шалгаж байна...</div>
+        <div style="font-size:12px;margin-top:6px">30-60 секунд хүлээнэ үү</div>
+      </div>`;
+
+    try {
+      const data = await api("/api/ai-test/run", { method: "POST" });
+
+      // Stats
+      const scoreColor = data.score >= 80 ? "#16a34a" : data.score >= 60 ? "#d97706" : "#dc2626";
+      document.getElementById("aiTestStats").innerHTML = `
+        <div style="background:#f8fafc;border:1px solid #e2e6ed;border-radius:12px;padding:16px;text-align:center">
+          <div style="font-size:26px;font-weight:900;color:#1e293b">${data.total}</div>
+          <div style="font-size:11px;color:#667085;margin-top:4px">Нийт тест</div>
+        </div>
+        <div style="background:#dcfce7;border:1px solid #86efac;border-radius:12px;padding:16px;text-align:center">
+          <div style="font-size:26px;font-weight:900;color:#16a34a">${data.passed}</div>
+          <div style="font-size:11px;color:#15803d;margin-top:4px">Амжилттай</div>
+        </div>
+        <div style="background:${data.failed?'#fee2e2':'#f8fafc'};border:1px solid ${data.failed?'#fca5a5':'#e2e6ed'};border-radius:12px;padding:16px;text-align:center">
+          <div style="font-size:26px;font-weight:900;color:${data.failed?'#dc2626':'#94a3b8'}">${data.failed}</div>
+          <div style="font-size:11px;color:${data.failed?'#991b1b':'#94a3b8'};margin-top:4px">Алдаатай</div>
+        </div>
+        <div style="background:#fff;border:2px solid ${scoreColor};border-radius:12px;padding:16px;text-align:center">
+          <div style="font-size:26px;font-weight:900;color:${scoreColor}">${data.score}%</div>
+          <div style="font-size:11px;color:${scoreColor};margin-top:4px">Ерөнхий оноо</div>
+        </div>`;
+
+      // AI analysis
+      if (data.ai_analysis) {
+        const aiEl = document.getElementById("aiTestAI");
+        aiEl.style.display = "block";
+        aiEl.innerHTML = `<div style="font-size:11px;color:#94a3b8;margin-bottom:10px;font-weight:700">🤖 GPT-4 ШИНЖИЛГЭЭ · ${new Date(data.ran_at).toLocaleString("mn-MN")}</div>` +
+          escapeHtml(data.ai_analysis)
+            .replace(/## (.+)/g, '<div style="font-size:14px;font-weight:800;color:#f1f5f9;margin:14px 0 6px">$1</div>')
+            .replace(/\n/g, "<br>");
+      }
+
+      // Test results grouped
+      const groups = {};
+      (data.results || []).forEach(r => {
+        if (!groups[r.group]) groups[r.group] = [];
+        groups[r.group].push(r);
+      });
+
+      const resultsHtml = Object.entries(groups).map(([grp, items]) => {
+        const gPass = items.filter(i => i.pass).length;
+        return `<div style="background:#fff;border:1px solid #e2e6ed;border-radius:12px;overflow:hidden;margin-bottom:8px">
+          <div style="padding:10px 14px;background:#f8fafc;border-bottom:1px solid #e2e6ed;display:flex;align-items:center;justify-content:space-between">
+            <span style="font-weight:700;font-size:13px">${escapeHtml(grp)}</span>
+            <span style="font-size:11px;color:${gPass===items.length?'#16a34a':'#d97706'};font-weight:700">${gPass}/${items.length}</span>
+          </div>
+          ${items.map(r => `
+            <div style="padding:8px 14px;border-bottom:1px solid #f1f5f9;display:flex;align-items:flex-start;gap:10px">
+              <span style="font-size:14px;flex-shrink:0;margin-top:1px">${r.pass ? "✅" : "❌"}</span>
+              <div style="min-width:0">
+                <div style="font-size:12px;font-weight:600;color:#1e293b">${escapeHtml(r.name)}</div>
+                <div style="font-size:11px;color:${r.pass?'#667085':'#dc2626'};margin-top:2px">${escapeHtml(r.detail)}</div>
+              </div>
+            </div>`).join("")}
+        </div>`;
+      }).join("");
+
+      document.getElementById("aiTestResults").innerHTML = resultsHtml ||
+        `<div style="text-align:center;color:#94a3b8;padding:20px">Тест үр дүн байхгүй</div>`;
+
+    } catch(e) {
+      document.getElementById("aiTestResults").innerHTML =
+        `<div style="background:#fee2e2;border:1px solid #fca5a5;border-radius:10px;padding:16px;color:#991b1b">
+          ❌ Тест ажиллуулахад алдаа гарлаа: ${escapeHtml(e.message)}
+        </div>`;
+    } finally {
+      if (btn) { btn.disabled = false; btn.innerHTML = "▶ Тест ажиллуулах"; }
+    }
+  };
+}
+
+async function ai_test() {
+  main.innerHTML = `<div style="padding:24px 0;max-width:900px">
+    <div style="margin-bottom:20px">
+      <h1 style="margin:0 0 4px;font-size:20px">🤖 AI Автомат тест</h1>
+      <div style="font-size:12px;color:#667085">ERP-ийн API, аюулгүй байдал, өгөгдлийн бүрэн бүтэн байдлыг автоматаар шалгаад GPT-4 шинжилгээ өгнө</div>
+    </div>
+    <div style="display:flex;justify-content:flex-end;margin-bottom:20px">
+      <button id="btnRunAiTest" onclick="runAiTest()"
+        style="background:#2563eb;color:#fff;border:0;border-radius:10px;padding:11px 24px;font-size:14px;font-weight:800;cursor:pointer">
+        ▶ Тест ажиллуулах
+      </button>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px" id="aiTestStats">
+      ${["Нийт тест","Амжилттай","Алдаатай","Оноо"].map(l =>
+        `<div style="background:#f8fafc;border:1px solid #e2e6ed;border-radius:12px;padding:16px;text-align:center">
+          <div style="font-size:24px;font-weight:900;color:#94a3b8">—</div>
+          <div style="font-size:11px;color:#94a3b8;margin-top:4px">${l}</div>
+        </div>`).join("")}
+    </div>
+    <div id="aiTestAI" style="display:none;margin-bottom:20px;background:#0f172a;border-radius:12px;padding:20px;color:#e2e8f0;font-size:13px;line-height:1.75;white-space:pre-wrap"></div>
+    <div id="aiTestResults"></div>
+  </div>`;
+
+  window.runAiTest = async () => {
+    const btn = document.getElementById("btnRunAiTest");
+    if (btn) { btn.disabled = true; btn.innerHTML = "⏳ Шалгаж байна... (30-60с)"; }
+    document.getElementById("aiTestResults").innerHTML = `
+      <div style="text-align:center;padding:50px;color:#94a3b8">
+        <div style="font-size:40px;margin-bottom:14px">🔍</div>
+        <div style="font-size:14px;font-weight:700">API endpoint-уудыг шалгаж байна...</div>
+        <div style="font-size:12px;margin-top:6px">Хүлээнэ үү</div>
+      </div>`;
+    try {
+      const data = await api("/api/ai-test/run", { method: "POST" });
+      const sc = data.score >= 80 ? "#16a34a" : data.score >= 60 ? "#d97706" : "#dc2626";
+      document.getElementById("aiTestStats").innerHTML = `
+        <div style="background:#f8fafc;border:1px solid #e2e6ed;border-radius:12px;padding:16px;text-align:center">
+          <div style="font-size:26px;font-weight:900;color:#1e293b">${data.total}</div>
+          <div style="font-size:11px;color:#667085;margin-top:4px">Нийт тест</div>
+        </div>
+        <div style="background:#dcfce7;border:1px solid #86efac;border-radius:12px;padding:16px;text-align:center">
+          <div style="font-size:26px;font-weight:900;color:#16a34a">${data.passed}</div>
+          <div style="font-size:11px;color:#15803d;margin-top:4px">Амжилттай</div>
+        </div>
+        <div style="background:${data.failed?'#fee2e2':'#f8fafc'};border:1px solid ${data.failed?'#fca5a5':'#e2e6ed'};border-radius:12px;padding:16px;text-align:center">
+          <div style="font-size:26px;font-weight:900;color:${data.failed?'#dc2626':'#94a3b8'}">${data.failed}</div>
+          <div style="font-size:11px;color:${data.failed?'#991b1b':'#94a3b8'};margin-top:4px">Алдаатай</div>
+        </div>
+        <div style="background:#fff;border:2px solid ${sc};border-radius:12px;padding:16px;text-align:center">
+          <div style="font-size:26px;font-weight:900;color:${sc}">${data.score}%</div>
+          <div style="font-size:11px;color:${sc};margin-top:4px">Ерөнхий оноо</div>
+        </div>`;
+      if (data.ai_analysis) {
+        const aiEl = document.getElementById("aiTestAI");
+        aiEl.style.display = "block";
+        aiEl.innerHTML = `<div style="font-size:11px;color:#94a3b8;margin-bottom:10px;font-weight:700;letter-spacing:.5px">🤖 GPT-4 ШИНЖИЛГЭЭ · ${new Date(data.ran_at).toLocaleString("mn-MN")} · ${data.duration_ms}ms</div>` +
+          escapeHtml(data.ai_analysis)
+            .replace(/## (.+)/g, '<div style="font-size:14px;font-weight:800;color:#f1f5f9;margin:16px 0 6px">$1</div>')
+            .replace(/\n/g, "<br>");
+      }
+      const groups = {};
+      (data.results || []).forEach(r => { if (!groups[r.group]) groups[r.group]=[]; groups[r.group].push(r); });
+      document.getElementById("aiTestResults").innerHTML = Object.entries(groups).map(([grp, items]) => {
+        const gp = items.filter(i=>i.pass).length;
+        return `<div style="background:#fff;border:1px solid #e2e6ed;border-radius:12px;overflow:hidden;margin-bottom:10px">
+          <div style="padding:10px 16px;background:#f8fafc;border-bottom:1px solid #e2e6ed;display:flex;align-items:center;justify-content:space-between">
+            <span style="font-weight:700;font-size:13px">${escapeHtml(grp)}</span>
+            <span style="font-size:12px;font-weight:700;color:${gp===items.length?'#16a34a':'#d97706'}">${gp}/${items.length}</span>
+          </div>
+          ${items.map(r=>`
+            <div style="padding:9px 16px;border-bottom:1px solid #f1f5f9;display:flex;align-items:flex-start;gap:10px">
+              <span style="font-size:15px;flex-shrink:0">${r.pass?"✅":"❌"}</span>
+              <div>
+                <div style="font-size:12px;font-weight:600;color:#1e293b">${escapeHtml(r.name)}</div>
+                <div style="font-size:11px;color:${r.pass?'#667085':'#dc2626'};margin-top:2px">${escapeHtml(r.detail)}</div>
+              </div>
+            </div>`).join("")}
+        </div>`;
+      }).join("") || `<div style="text-align:center;color:#94a3b8;padding:20px">Тест үр дүн байхгүй</div>`;
+    } catch(e) {
+      document.getElementById("aiTestResults").innerHTML =
+        `<div style="background:#fee2e2;border:1px solid #fca5a5;border-radius:10px;padding:16px;color:#991b1b">❌ Алдаа: ${escapeHtml(e.message)}</div>`;
+    } finally {
+      if (btn) { btn.disabled=false; btn.innerHTML="▶ Тест ажиллуулах"; }
+    }
+  };
+}
+
 Object.assign(window, {
   admin_hub,
   openScanModal, closeScanModal, doScanUpload,
   toggleScanNoteEdit, saveScanNote, deleteScanFile,
-  ahbWorkCats
+  ahbWorkCats, ahbAiTest, ai_test
 });

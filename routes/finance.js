@@ -6,7 +6,7 @@ const router = express.Router();
 
 // ── Cash Journal (Мөнгөн хөрөнгийн журнал) ──────────────────
 
-router.get("/cash-journal", auth, async (req, res) => {
+router.get("/cash-journal", auth, requirePermission("finance_read"), async (req, res) => {
   const { from, to, txn_type } = req.query;
   let sql = `SELECT cj.*, u.full_name created_name
     FROM cash_journal cj LEFT JOIN users u ON u.id=cj.created_by WHERE 1=1`;
@@ -85,10 +85,23 @@ router.delete("/cash-journal-range", auth, requireRole("director"), async (req, 
 
 router.get("/payables", auth, async (req, res) => {
   try {
+    const { year, month, from, to } = req.query;
+    let where = "WHERE 1=1";
+    const params = [];
+    if (year && month) {
+      const prefix = `${year}-${String(month).padStart(2, "0")}`;
+      where += " AND ap.invoice_date LIKE ?";
+      params.push(`${prefix}%`);
+    } else {
+      if (from) { where += " AND ap.invoice_date >= ?"; params.push(from); }
+      if (to)   { where += " AND ap.invoice_date <= ?"; params.push(to); }
+    }
     res.json(await all(
       `SELECT ap.*, u.full_name created_name FROM accounts_payable ap
        LEFT JOIN users u ON u.id=ap.created_by
-       ORDER BY ap.due_date ASC, ap.id DESC`));
+       ${where}
+       ORDER BY ap.due_date ASC, ap.invoice_date DESC, ap.id DESC`,
+      params));
   } catch (e) { res.json([]); }
 });
 
@@ -130,10 +143,23 @@ router.delete("/payables/:id", auth, requireRole("director"), async (req, res) =
 
 router.get("/receivables", auth, async (req, res) => {
   try {
+    const { year, month, from, to } = req.query;
+    let where = "WHERE 1=1";
+    const params = [];
+    if (year && month) {
+      const prefix = `${year}-${String(month).padStart(2, "0")}`;
+      where += " AND ar.invoice_date LIKE ?";
+      params.push(`${prefix}%`);
+    } else {
+      if (from) { where += " AND ar.invoice_date >= ?"; params.push(from); }
+      if (to)   { where += " AND ar.invoice_date <= ?"; params.push(to); }
+    }
     res.json(await all(
       `SELECT ar.*, u.full_name created_name FROM accounts_receivable ar
        LEFT JOIN users u ON u.id=ar.created_by
-       ORDER BY ar.due_date ASC, ar.id DESC`));
+       ${where}
+       ORDER BY ar.due_date ASC, ar.invoice_date DESC, ar.id DESC`,
+      params));
   } catch (e) { res.json([]); }
 });
 
@@ -290,24 +316,52 @@ router.delete("/fixed-ledger-all", auth, requireRole("director"), async (req, re
 
 router.get("/finance-summary", auth, async (req, res) => {
   try {
-    const [cashIn, cashOut, payables, receivables, payroll] = await Promise.all([
+    const [cashIn, cashOut, latestPayable, latestReceivable, salaryExpense] = await Promise.all([
       get(`SELECT COALESCE(SUM(amount),0) as total FROM cash_journal WHERE txn_type='Орлого'`),
       get(`SELECT COALESCE(SUM(amount),0) as total FROM cash_journal WHERE txn_type='Зарлага'`),
-      get(`SELECT COALESCE(SUM(amount-paid_amount),0) as total FROM accounts_payable WHERE status != 'Төлөгдсөн'`),
-      get(`SELECT COALESCE(SUM(amount-received_amount),0) as total FROM accounts_receivable WHERE status != 'Хүлээн авсан'`),
-      get(`SELECT COALESCE(SUM(net_salary),0) as total FROM payroll_timesheet
-          WHERE year=CAST(strftime('%Y',CURRENT_DATE) AS INTEGER)
-            AND month=CAST(strftime('%m',CURRENT_DATE) AS INTEGER)`)
+      get(`SELECT MAX(substr(invoice_date,1,7)) as period FROM accounts_payable WHERE COALESCE(invoice_date,'') != ''`),
+      get(`SELECT MAX(substr(invoice_date,1,7)) as period FROM accounts_receivable WHERE COALESCE(invoice_date,'') != ''`),
+      get(`SELECT COALESCE(SUM(amount),0) as total
+           FROM cash_journal
+           WHERE txn_type='Зарлага'
+             AND (
+               econ_category LIKE '210101%'
+               OR corr_account LIKE '210101%'
+               OR cash_flow_type LIKE '210101%'
+               OR cash_flow_type LIKE '%210101-%Үндсэн цалин%'
+               OR purpose LIKE '210101%'
+               OR debit_account LIKE '210101%'
+               OR credit_account LIKE '210101%'
+               OR description LIKE '%210101%'
+             )`)
     ]);
+    const payablePeriod = latestPayable?.period || "";
+    const receivablePeriod = latestReceivable?.period || "";
+    const [payables, receivables] = await Promise.all([
+      payablePeriod
+        ? get(`SELECT COALESCE(SUM(amount-paid_amount),0) as total
+               FROM accounts_payable
+               WHERE status != 'Төлөгдсөн' AND invoice_date LIKE ?`, [`${payablePeriod}%`])
+        : { total: 0 },
+      receivablePeriod
+        ? get(`SELECT COALESCE(SUM(amount-received_amount),0) as total
+               FROM accounts_receivable
+               WHERE status != 'Хүлээн авсан' AND invoice_date LIKE ?`, [`${receivablePeriod}%`])
+        : { total: 0 },
+    ]);
+    const salaryTotal = Number(salaryExpense.total || 0);
     res.json({
       cash_in:          cashIn.total,
       cash_out:         cashOut.total,
       cash_balance:     cashIn.total - cashOut.total,
       total_payable:    payables.total,
       total_receivable: receivables.total,
-      current_payroll:  payroll.total
+      payable_period:   payablePeriod,
+      receivable_period:receivablePeriod,
+      current_payroll:  salaryTotal,
+      current_salary_210101: salaryTotal
     });
-  } catch (e) { res.json({ cash_in:0, cash_out:0, cash_balance:0, total_payable:0, total_receivable:0, current_payroll:0 }); }
+  } catch (e) { res.json({ cash_in:0, cash_out:0, cash_balance:0, total_payable:0, total_receivable:0, payable_period:"", receivable_period:"", current_payroll:0, current_salary_210101:0 }); }
 });
 
 // ── Excel Import (parse uploaded file) ───────────────────────
@@ -342,6 +396,11 @@ router.post("/finance-import/commit", auth, requirePermission("finance_write"), 
   const { table: tbl, mapping, rows } = req.body;
   if (!["cash_journal","accounts_payable","accounts_receivable"].includes(tbl))
     return res.status(400).json({ error: "Зөвшөөрөгдөөгүй хүснэгт" });
+  const targetYear = Number(req.body.target_year || new Date().getFullYear());
+  const targetMonth = Number(req.body.target_month || (new Date().getMonth() + 1));
+  const targetDate = /^\d{4}-\d{2}-\d{2}$/.test(String(req.body.target_date || ""))
+    ? String(req.body.target_date)
+    : `${targetYear}-${String(targetMonth).padStart(2, "0")}-01`;
   let inserted = 0, errors = [];
   for (const row of rows) {
     const record = {};
@@ -365,18 +424,22 @@ router.post("/finance-import/commit", auth, requirePermission("finance_write"), 
            record.description||"", record.counterparty||"",
            amount, record.note||"", req.user.id]);
       } else if (tbl === "accounts_payable") {
+        const invoiceDate = excelDateToISO(record.invoice_date) || targetDate;
+        const dueDate = record.due_date ? excelDateToISO(record.due_date) : "";
         await run(
           `INSERT INTO accounts_payable(vendor_name,invoice_no,invoice_date,due_date,amount,status,description,created_by)
            VALUES(?,?,?,?,?,?,?,?)`,
-          [record.vendor_name||"", record.invoice_no||"", record.invoice_date||"",
-           record.due_date||"", Number(record.amount||0),
+          [record.vendor_name||"", record.invoice_no||"", invoiceDate,
+           dueDate, Number(record.amount||0),
            record.status||"Төлөгдөөгүй", record.description||"", req.user.id]);
       } else if (tbl === "accounts_receivable") {
+        const invoiceDate = excelDateToISO(record.invoice_date) || targetDate;
+        const dueDate = record.due_date ? excelDateToISO(record.due_date) : "";
         await run(
           `INSERT INTO accounts_receivable(debtor_name,invoice_no,invoice_date,due_date,amount,status,description,created_by)
            VALUES(?,?,?,?,?,?,?,?)`,
-          [record.debtor_name||"", record.invoice_no||"", record.invoice_date||"",
-           record.due_date||"", Number(record.amount||0),
+          [record.debtor_name||"", record.invoice_no||"", invoiceDate,
+           dueDate, Number(record.amount||0),
            record.status||"Хүлээгдэж буй", record.description||"", req.user.id]);
       }
       inserted++;
