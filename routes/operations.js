@@ -239,13 +239,13 @@ router.put("/work-logs/:id", auth, requirePermission("operations_write"), async 
   if (refError) return res.status(400).json({ error: refError });
   const assetIds = parseWorkAssetIds(b);
   const resolvedAssetId = await resolveAssetId(b);
-  const computedProgress = await syncWorkProgress(req.params.id);
+  const manualProgress = normalizeProgress(Number(b.progress ?? 0));
   await run(`UPDATE asset_events SET title=?,category=?,department=?,location=?,description=?,
     status=?,progress=?,assigned_to=?,work_date=?,start_date=?,end_date=?,cost_amount=?,
     material_note=?,asset_id=?,asset_ids=?,ger_inventory_id=?,sl_point_id=?,sl_sub_category=?,
     updated_at=CURRENT_TIMESTAMP WHERE id=?`,
     [b.title, b.category, b.department || "", b.location || "", b.description || "",
-     b.status || WORK_ORDER_STATUS.IN_PROGRESS, computedProgress, b.assigned_to || null,
+     b.status || WORK_ORDER_STATUS.IN_PROGRESS, manualProgress, b.assigned_to || null,
      b.work_date, b.start_date || null, b.end_date || null,
      b.cost_amount || 0, b.material_note || "", resolvedAssetId, JSON.stringify(assetIds),
      b.ger_inventory_id || null, b.sl_point_id || null, b.sl_sub_category || null,
