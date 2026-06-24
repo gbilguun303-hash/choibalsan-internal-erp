@@ -2536,6 +2536,7 @@ app.use("/api", require("./routes/hr_extended"));
 app.use("/api", require("./routes/chat"));
 app.use("/api", require("./routes/ai_test"));
 app.use("/api", require("./routes/public_portal"));
+app.use("/api", require("./routes/ai_advisor"));
 require("./services/mcp/server").installMcpRoutes(app);
 // Public entry must stay separate from ERP login:
 //   / and /portal -> citizen/public information site
