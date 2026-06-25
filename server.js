@@ -2544,6 +2544,7 @@ require("./services/mcp/server").installMcpRoutes(app);
 // Keep this protected with `npm run test:routes`.
 app.get("/", (_req, res) => res.sendFile(path.join(__dirname, "public", "portal.html")));
 app.get("/portal", (_req, res) => res.sendFile(path.join(__dirname, "public", "portal.html")));
+app.get("/home", (_req, res) => res.sendFile(path.join(__dirname, "public", "home.html")));
 app.get(["/login", "/erp"], (_req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 
 // ── Global error handler ──────────────────────────────────────

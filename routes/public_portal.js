@@ -191,6 +191,135 @@ router.get("/public-portal/posts", async (req, res) => {
   res.json(rows.map(normalizePost));
 });
 
+router.get("/public/home", async (_req, res) => {
+  await ensureCitizenReportTable();
+  await ensurePublicPostTable();
+  const safeCount = async (sql, params = []) => {
+    try {
+      const row = await get(sql, params);
+      return Number(row?.count || 0);
+    } catch (_) {
+      return 0;
+    }
+  };
+  const safeRows = async (sql, params = []) => {
+    try {
+      return await all(sql, params);
+    } catch (_) {
+      return [];
+    }
+  };
+
+  const [orgRows, posts] = await Promise.all([
+    safeRows("SELECT key,value FROM org_settings WHERE key IN ('org_name','address','phone','email')"),
+    safeRows(
+      `SELECT id,post_type,title,summary,body,image_url,deadline,contact_phone,contact_email,created_at,updated_at
+         FROM public_posts
+        WHERE published=1
+        ORDER BY featured DESC, COALESCE(updated_at, created_at) DESC
+        LIMIT 12`
+    ),
+  ]);
+  const organization = Object.fromEntries(orgRows.map(row => [row.key, row.value || ""]));
+  const latest = posts.map(row => ({
+    id: row.id,
+    title: row.title,
+    category: row.post_type === "job" ? "Ажлын байр" : row.post_type === "announcement" ? "Зарлал" : "Мэдээ",
+    description: row.summary || row.body || "",
+    date: row.deadline || row.updated_at || row.created_at,
+    created_at: row.created_at,
+    type: row.post_type === "job" ? "job" : "news",
+  }));
+  const jobs = posts
+    .filter(row => row.post_type === "job")
+    .map(row => ({
+      id: row.id,
+      title: row.title,
+      category: "Ажлын байр",
+      description: [row.summary, row.body].filter(Boolean).join("\n\n"),
+      date: row.deadline,
+      created_at: row.created_at,
+      type: "job",
+    }));
+  const contents = posts
+    .filter(row => row.post_type !== "job")
+    .map(row => ({
+      id: row.id,
+      section: row.post_type === "announcement" ? "news" : "news",
+      content_key: row.post_type || "news",
+      title: row.title,
+      body: row.summary || row.body || "",
+      image_url: row.image_url || "",
+      link_url: "",
+      sort_order: 99,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    }));
+
+  const roadHeads = await safeCount(
+    `SELECT COALESCE(SUM(CASE WHEN total_heads > 0 THEN total_heads ELSE lamp_count END), 0) count
+       FROM sl_points WHERE status='active' OR status='Идэвхтэй'`
+  );
+  const gerHeads = await safeCount(
+    `SELECT COALESCE(SUM(total_count), 0) count
+       FROM sl_ger_inventory WHERE category='Гэр хороолол' OR category='Гэр хорооллын гэрэл'`
+  );
+  const towerHeads = await safeCount(
+    `SELECT COALESCE(SUM(total_count), 0) count
+       FROM sl_ger_inventory WHERE category='Цамхаг' OR category='Цамхагийн гэрэл'`
+  );
+  const brokenHeads = await safeCount(
+    `SELECT COALESCE(SUM(broken_count), 0) count FROM sl_faults WHERE status!='Дууссан'`
+  );
+  const trafficTotal = await safeCount("SELECT COUNT(*) count FROM assets WHERE category='Гэрлэн дохио'");
+  const trafficWorking = await safeCount("SELECT COUNT(*) count FROM assets WHERE category='Гэрлэн дохио' AND status='Асаалтай'");
+  const totalHeads = roadHeads + gerHeads + towerHeads;
+  const availabilityPct = totalHeads > 0
+    ? Math.round((Math.max(0, totalHeads - brokenHeads) / totalHeads) * 1000) / 10
+    : null;
+
+  res.json({
+    organization,
+    stats: {
+      employees: await safeCount("SELECT COUNT(*) count FROM users WHERE active=1"),
+      lights: totalHeads,
+      cameras: await safeCount(
+        `SELECT COALESCE(SUM(CASE WHEN camera_count IS NULL OR camera_count < 1 THEN 1 ELSE camera_count END), 0) count
+           FROM assets
+          WHERE category LIKE '%камер%' OR category LIKE '%Камер%' OR sub_category LIKE '%камер%' OR sub_category LIKE '%Камер%'`
+      ),
+      works: await safeCount("SELECT COUNT(*) count FROM asset_events"),
+      jobs: jobs.length,
+      documents: await safeCount("SELECT COUNT(*) count FROM documents"),
+      citizen_reports: await safeCount("SELECT COUNT(*) count FROM citizen_reports"),
+    },
+    lighting: {
+      poles: totalHeads,
+      road_heads: roadHeads,
+      ger_heads: gerHeads,
+      tower_heads: towerHeads,
+      broken_heads: brokenHeads,
+      traffic_total: trafficTotal,
+      traffic_working: trafficWorking,
+      total_heads: totalHeads,
+      working_heads: Math.max(0, totalHeads - brokenHeads),
+      availability_pct: availabilityPct,
+      road_availability_pct: null,
+      ger_availability_pct: null,
+      tower_availability_pct: null,
+      traffic_availability_pct: trafficTotal > 0 ? Math.round((trafficWorking / trafficTotal) * 1000) / 10 : null,
+    },
+    hse: {
+      open_public_reports: await safeCount("SELECT COUNT(*) count FROM citizen_reports WHERE status IN ('new','accepted','working')"),
+      this_month_reports: await safeCount("SELECT COUNT(*) count FROM citizen_reports WHERE substr(created_at,1,7)=strftime('%Y-%m','now','localtime')"),
+      internal_open_risks: await safeCount("SELECT COUNT(*) count FROM safety_reports WHERE COALESCE(workflow_status,'Шинэ')!='Хаасан'"),
+    },
+    contents,
+    jobs,
+    latest,
+  });
+});
+
 router.get("/public-portal/alerts", async (_req, res) => {
   await ensurePublicAlertTable();
   const rows = await all(
@@ -236,6 +365,49 @@ router.post("/public-portal/reports", upload.single("image"), async (req, res) =
     [tracking, issueType, location, description, citizenName, phone, imageUrl, gpsLat, gpsLng]
   );
   res.json({ ok: true, tracking_code: tracking });
+});
+
+router.post("/public/hazard-reports", upload.single("image"), async (req, res) => {
+  await ensureCitizenReportTable();
+  const location = String(req.body.location || "").trim();
+  const description = String(req.body.description || "").trim();
+  if (!location || !description) {
+    return res.status(400).json({ error: "Байршил болон аюулын тайлбар оруулна уу" });
+  }
+  let tracking = makeTrackingCode();
+  for (let i = 0; i < 5; i++) {
+    const exists = await get("SELECT id FROM citizen_reports WHERE tracking_code=?", [tracking]);
+    if (!exists) break;
+    tracking = makeTrackingCode();
+  }
+  const imageUrl = req.file ? `/uploads/${req.file.filename}` : "";
+  await run(
+    `INSERT INTO citizen_reports
+      (tracking_code,issue_type,location,description,citizen_name,phone,image_url,priority)
+     VALUES(?,?,?,?,?,?,?,?)`,
+    [
+      tracking,
+      String(req.body.hazard_type || "ХАБЭА / Аюул мэдээлэх").trim(),
+      location,
+      description,
+      String(req.body.reporter_name || "").trim(),
+      String(req.body.reporter_phone || "").trim(),
+      imageUrl,
+      "high",
+    ]
+  );
+  res.json({ ok: true, tracking_code: tracking });
+});
+
+router.get("/public/hazard-reports/:trackingCode", async (req, res) => {
+  await ensureCitizenReportTable();
+  const row = await get(
+    `SELECT tracking_code, issue_type hazard_type, location, status, created_at
+       FROM citizen_reports WHERE tracking_code=?`,
+    [String(req.params.trackingCode || "").trim().toUpperCase()]
+  );
+  if (!row) return res.status(404).json({ error: "Мэдээлэл олдсонгүй" });
+  res.json(row);
 });
 
 router.get("/citizen-reports", auth, async (req, res) => {
